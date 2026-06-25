@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>样本验证 | A股分时异动雷达</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>样本验证</h1>
+          <nav class="page-nav">
+            <a href="/">实时雷达</a>
+            <a href="/review.html">复盘</a>
+            <a class="active" href="/backtest.html">验证</a>
+            <a href="/settings.html">配置</a>
+            <a href="/diagnostics.html">诊断</a>
+          </nav>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="hint">当前主线只使用系统实时记录的强关注样本，不再依赖外部历史 1 分钟 K 线。样本越多，次日观察和策略判断越可靠。</div>
+        <form id="backtestForm" class="backtest-form">
+          <label>
+            <span>买入</span>
+            <select name="entry">
+              <option value="trigger">触发价</option>
+              <option value="next_open">次日开盘</option>
+            </select>
+          </label>
+          <label>
+            <span>卖出</span>
+            <select name="exit">
+              <option value="m1">1分钟</option>
+              <option value="m3">3分钟</option>
+              <option value="m5" selected>5分钟</option>
+              <option value="m10">10分钟</option>
+              <option value="intraday_current">盘中当前</option>
+              <option value="intraday_high">盘中最高</option>
+              <option value="next_open">次日开盘</option>
+              <option value="next_high">次日最高</option>
+              <option value="next_close">次日收盘</option>
+            </select>
+          </label>
+          <label>
+            <span>最低信号分</span>
+            <input name="min_score" type="number" min="0" max="200" value="0" />
+          </label>
+          <label>
+            <span>最低盘中分</span>
+            <input name="min_intraday_score" type="number" min="0" max="100" value="0" />
+          </label>
+          <label>
+            <span>最低复盘分</span>
+            <input name="min_review_score" type="number" min="0" max="100" value="0" />
+          </label>
+          <label class="checkline">
+            <input name="include_shadow" type="checkbox" />
+            <span>影子策略</span>
+          </label>
+          <button type="submit">验证</button>
+        </form>
+      </section>
+
+      <section class="review-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>样本验证结果</h2>
+          </div>
+          <div id="backtestSummary" class="report-content compact">
+            <div class="muted-line">等待样本验证</div>
+          </div>
+        </section>
+
+        <details class="panel advanced-history-panel">
+          <summary>历史分时回放（暂停）</summary>
+          <div class="advanced-history-body">
+          <div class="panel-header">
+            <h2>历史快速拉升回放</h2>
+          </div>
+          <form id="historyBacktestForm" class="backtest-form history-backtest-form">
+            <label>
+              <span>日期</span>
+              <input name="date" type="date" required />
+            </label>
+            <label>
+              <span>多日期</span>
+              <input name="dates" placeholder="可选：20260521,20260520" />
+            </label>
+            <label>
+              <span>股票数量</span>
+              <input name="max_symbols" type="number" min="1" max="500" value="20" />
+            </label>
+            <label>
+              <span>1m涨速%</span>
+              <input name="rise_1m" type="number" min="0" max="10" step="0.1" value="0.7" />
+            </label>
+            <label>
+              <span>3m涨速%</span>
+              <input name="rise_3m" type="number" min="0" max="15" step="0.1" value="1.2" />
+            </label>
+            <label>
+              <span>2m成交额</span>
+              <input name="min_amount_2m" type="number" min="0" step="100000" value="5000000" />
+            </label>
+            <label>
+              <span>最高日涨幅%</span>
+              <input name="max_day_change" type="number" min="0" max="20" step="0.1" value="7.5" />
+            </label>
+            <label>
+              <span>指定股票</span>
+              <input name="codes" placeholder="可选：600000,000001" />
+            </label>
+            <label class="checkline">
+              <input name="include_gem" type="checkbox" />
+              <span>创业板</span>
+            </label>
+            <label class="checkline">
+              <input name="include_star" type="checkbox" />
+              <span>科创板</span>
+            </label>
+            <label class="checkline">
+              <input name="require_limit_up" type="checkbox" checked />
+              <span>当日涨停</span>
+            </label>
+            <button type="submit">回放</button>
+          </form>
+          <div class="hint">该工具需要外部历史 1 分钟 K 线，当前不作为主流程使用；如只做实盘系统，可忽略此区域。</div>
+          <div class="hint">字段含义：触发前涨幅是买入信号出现前 1/3 分钟涨幅；买入后收益按触发价计算；次日开盘/最高/收盘也是相对触发价计算。</div>
+          <div id="historyJobStatus" class="job-status">
+            <span>等待任务</span>
+            <div><i style="width:0%"></i></div>
+          </div>
+          <div id="historySummary" class="report-content compact">
+            <div class="muted-line">等待历史回放</div>
+          </div>
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>次日</th>
+                  <th>样本</th>
+                  <th>扫描</th>
+                  <th>5m均收益</th>
+                  <th>次日开盘</th>
+                  <th>次日最高</th>
+                  <th>次日收盘</th>
+                  <th>次日胜率</th>
+                </tr>
+              </thead>
+              <tbody id="historyDateRows">
+                <tr><td colspan="9" class="empty">等待历史回放</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>股票</th>
+                  <th>样本</th>
+                  <th>1m胜率</th>
+                  <th>3m胜率</th>
+                  <th>5m均收益</th>
+                  <th>10m均收益</th>
+                  <th>次日样本</th>
+                  <th>次日收盘</th>
+                  <th>10m均高点</th>
+                </tr>
+              </thead>
+              <tbody id="historySymbolRows">
+                <tr><td colspan="9" class="empty">等待历史回放</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-wrap">
+            <table class="history-backtest-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>股票</th>
+                  <th>触发价</th>
+                  <th>触发前1m</th>
+                  <th>触发前3m</th>
+                  <th>首次涨停</th>
+                  <th>触发2m额</th>
+                  <th>买入后1m</th>
+                  <th>买入后3m</th>
+                  <th>买入后5m</th>
+                  <th>买入后10m</th>
+                  <th>10m浮盈/回撤</th>
+                  <th>次日数据</th>
+                  <th>次日开盘</th>
+                  <th>次日最高</th>
+                  <th>次日收盘</th>
+                </tr>
+              </thead>
+              <tbody id="historySignalRows">
+                <tr><td colspan="16" class="empty">等待历史回放</td></tr>
+              </tbody>
+            </table>
+          </div>
+          </div>
+        </details>
+
+        <section class="page-grid two">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>板块表现</h2>
+            </div>
+            <div class="table-wrap compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>板块</th>
+                    <th>样本</th>
+                    <th>胜率</th>
+                    <th>均收益</th>
+                    <th>最好</th>
+                    <th>最差</th>
+                  </tr>
+                </thead>
+                <tbody id="sectorRows">
+                <tr><td colspan="6" class="empty">等待样本验证</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>策略表现</h2>
+            </div>
+            <div class="table-wrap compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>版本</th>
+                    <th>样本</th>
+                    <th>胜率</th>
+                    <th>均收益</th>
+                    <th>最好</th>
+                    <th>最差</th>
+                  </tr>
+                </thead>
+                <tbody id="strategyBacktestRows">
+                <tr><td colspan="6" class="empty">等待样本验证</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>交易明细</h2>
+          </div>
+          <div class="table-wrap">
+            <table class="backtest-table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>股票</th>
+                  <th>板块</th>
+                  <th>版本</th>
+                  <th>买入</th>
+                  <th>卖出</th>
+                  <th>收益</th>
+                  <th>信号分</th>
+                  <th>盘中分</th>
+                  <th>次日分</th>
+                  <th>标签</th>
+                </tr>
+              </thead>
+              <tbody id="tradeRows">
+                <tr><td colspan="11" class="empty">等待样本验证</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/backtest.js"></script>
+  </body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>运行诊断 | A股分时异动雷达</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>运行诊断</h1>
+          <nav class="page-nav">
+            <a href="/">实时雷达</a>
+            <a href="/review.html">复盘</a>
+            <a href="/backtest.html">验证</a>
+            <a href="/settings.html">配置</a>
+            <a class="active" href="/diagnostics.html">诊断</a>
+          </nav>
+        </div>
+        <div class="status">
+          <strong id="diagnosticsClock">--:--:--</strong>
+        </div>
+      </section>
+
+      <section class="page-grid two">
+        <section class="panel diagnostics-wide">
+          <div class="panel-header">
+            <h2>状态总览</h2>
+          </div>
+          <div id="diagnosticsCards" class="status-cards">
+            <div class="muted-line">加载状态总览</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>主服务</h2>
+          </div>
+          <div id="diagnosticsRuntime" class="runtime-list">
+            <div class="muted-line">加载运行状态</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>候选池 / 过滤</h2>
+          </div>
+          <div id="diagnosticsCandidates" class="runtime-list">
+            <div class="muted-line">加载候选池状态</div>
+          </div>
+        </section>
+
+        <section class="panel diagnostics-wide">
+          <div class="panel-header">
+            <h2>策略漏斗</h2>
+          </div>
+          <div id="strategyFunnel" class="strategy-funnel">
+            <div class="muted-line">加载策略漏斗</div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/diagnostics.js"></script>
+  </body>
+</html>

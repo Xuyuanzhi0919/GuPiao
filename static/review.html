@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>复盘分析 | A股分时异动雷达</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>复盘分析</h1>
+          <nav class="page-nav">
+            <a href="/">实时雷达</a>
+            <a class="active" href="/review.html">复盘</a>
+            <a href="/backtest.html">验证</a>
+            <a href="/settings.html">配置</a>
+            <a href="/diagnostics.html">诊断</a>
+          </nav>
+        </div>
+        <div class="status">
+          <a class="mini-link" href="/api/focus/next-day/export">导出强关注</a>
+          <a class="mini-link" href="/api/signals/export">导出信号</a>
+          <a class="mini-link" href="/api/tracks/export">导出跟踪</a>
+        </div>
+      </section>
+
+      <section class="review-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>复盘总览</h2>
+          </div>
+          <div class="review-overview">
+            <div>
+              <h3>策略表现</h3>
+              <div id="strategySummary" class="report-content compact">
+                <div class="muted-line">加载策略评分</div>
+              </div>
+            </div>
+            <div>
+              <h3>次日表现</h3>
+              <div id="focusSummary" class="report-content compact">
+                <div class="muted-line">计算强关注统计</div>
+              </div>
+            </div>
+            <div>
+              <h3>触发后表现</h3>
+              <div id="focusIntradaySummary" class="report-content compact">
+                <div class="muted-line">计算触发后表现</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>策略建议</h2>
+          </div>
+          <div id="strategyAdvice" class="strategy-advice">
+            <div class="muted-line">生成策略建议</div>
+          </div>
+          <div id="tuningAdvice" class="tuning-advice">
+            <div class="muted-line">生成调参建议</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>强关注明细</h2>
+          </div>
+          <div class="review-detail-grid">
+            <section>
+              <div class="subsection-title">次日表现</div>
+              <div class="table-wrap focus-review-wrap">
+                <table class="focus-review-table">
+                  <thead>
+                    <tr>
+                      <th>股票</th>
+                      <th>触发</th>
+                      <th>结果</th>
+                      <th>开盘</th>
+                      <th>最高</th>
+                      <th>收盘</th>
+                      <th>回落</th>
+                      <th>评分</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reviewNextDay">
+                    <tr><td colspan="8" class="empty">加载强关注样本</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+            <section>
+              <div class="subsection-title">触发后表现</div>
+              <div class="table-wrap focus-review-wrap">
+                <table class="focus-intraday-table">
+                  <thead>
+                    <tr>
+                      <th>股票</th>
+                      <th>结果</th>
+                      <th>当前</th>
+                      <th>1分钟</th>
+                      <th>3分钟</th>
+                      <th>5分钟</th>
+                      <th>10分钟</th>
+                      <th>最高</th>
+                      <th>最低</th>
+                      <th>评分</th>
+                      <th>建议</th>
+                    </tr>
+                  </thead>
+                  <tbody id="focusIntradayRows">
+                    <tr><td colspan="11" class="empty">加载触发后表现</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>策略版本</h2>
+          </div>
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>版本</th>
+                  <th>天数</th>
+                  <th>已评估</th>
+                  <th>平均评分</th>
+                  <th>平均上涨率</th>
+                  <th>平均收益</th>
+                </tr>
+              </thead>
+              <tbody id="versionRows">
+                <tr><td colspan="6" class="empty">等待版本对比</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>版本</th>
+                  <th>评分</th>
+                  <th>样本</th>
+                  <th>上涨率</th>
+                  <th>均收益</th>
+                  <th>均最高</th>
+                  <th>均低点</th>
+                  <th>强板块</th>
+                  <th>建议</th>
+                </tr>
+              </thead>
+              <tbody id="strategyRows">
+                <tr><td colspan="10" class="empty">等待策略数据</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>盘中统计</h2>
+          </div>
+          <div id="reviewReport" class="report-content">
+            <div class="muted-line">加载复盘数据</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>最近信号</h2>
+        </div>
+        <div id="reviewHistory" class="history-list">
+          <div class="muted-line">加载历史信号</div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/review.js"></script>
+  </body>
+</html>

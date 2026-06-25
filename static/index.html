@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A股分时异动雷达</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell radar-shell">
+      <section class="topbar radar-topbar">
+        <div>
+          <h1>实盘异动雷达</h1>
+          <nav class="page-nav">
+            <a class="active" href="/">实时雷达</a>
+            <a href="/review.html">复盘</a>
+            <a href="/backtest.html">验证</a>
+            <a href="/settings.html">配置</a>
+            <a href="/diagnostics.html">诊断</a>
+          </nav>
+        </div>
+        <div class="status">
+          <span class="pulse" id="pulse"></span>
+          <span id="connection">连接中</span>
+          <span id="dataAge">数据 --</span>
+          <strong id="clock">--:--:--</strong>
+        </div>
+      </section>
+
+      <section class="metrics radar-metrics" aria-label="实盘概览">
+        <article>
+          <span>当前信号</span>
+          <strong id="signalCount">0</strong>
+        </article>
+        <article>
+          <span>A 级机会</span>
+          <strong id="gradeACount">0</strong>
+        </article>
+        <article>
+          <span>板块共振</span>
+          <strong id="hotSector">--</strong>
+        </article>
+        <article>
+          <span>最新信号</span>
+          <strong id="latestSignal">--</strong>
+        </article>
+        <article>
+          <span>跟踪中</span>
+          <strong id="trackCount">0</strong>
+        </article>
+        <article>
+          <span>正反馈</span>
+          <strong id="positiveRate">0%</strong>
+        </article>
+      </section>
+
+      <section class="quick-actions radar-controls" aria-label="实盘筛选">
+        <div class="segmented" id="gradeFilter">
+          <button type="button" data-grade="ALL" class="active">全部</button>
+          <button type="button" data-grade="A">A</button>
+          <button type="button" data-grade="B">B+</button>
+          <button type="button" data-grade="C">C+</button>
+        </div>
+        <label>
+          <span>板块</span>
+          <select id="sectorFilter">
+            <option value="ALL">全部</option>
+          </select>
+        </label>
+        <label>
+          <span>评分</span>
+          <input id="scoreFilter" type="number" min="0" max="100" value="55" />
+        </label>
+        <label>
+          <span>分钟额</span>
+          <input id="turnoverFilter" type="number" min="0" step="100" value="0" />
+        </label>
+        <label class="checkline">
+          <input id="watchOnlyFilter" type="checkbox" />
+          <span>关注</span>
+        </label>
+        <label class="checkline">
+          <input id="showBlockedFilter" type="checkbox" />
+          <span>屏蔽</span>
+        </label>
+        <div class="toolbar-actions">
+          <a href="/review.html">复盘</a>
+          <button id="soundButton" type="button" aria-pressed="false">声音关</button>
+          <a href="/api/signals/export">导出</a>
+        </div>
+      </section>
+
+      <section class="radar-workspace">
+        <aside class="desk-column watch-column">
+          <section class="panel candidate-panel">
+            <div class="candidate-summary">
+              <div class="candidate-title">
+                <h2>盯盘池</h2>
+                <span id="candidateStatus">等待候选池</span>
+              </div>
+              <div id="filterStats" class="filter-stats">
+                <span>过滤统计 --</span>
+              </div>
+              <div id="candidateQualityFilter" class="candidate-quality-filter" aria-label="候选质量筛选">
+                <button class="active" type="button" data-quality="ALL">全部</button>
+                <button type="button" data-quality="strong">强关注</button>
+                <button type="button" data-quality="watch">观察</button>
+                <button type="button" data-quality="caution">谨慎</button>
+              </div>
+            </div>
+            <div class="candidate-board">
+              <div class="subhead">强关注</div>
+              <div id="focusList" class="focus-list">
+                <div class="muted-line">等待重点盯盘</div>
+              </div>
+              <div class="subhead">候选排序</div>
+              <div id="candidateList" class="candidate-list">
+                <div class="muted-line">等待 TDX 候选池</div>
+              </div>
+            </div>
+          </section>
+        </aside>
+
+        <section class="desk-column signal-column">
+          <section class="panel table-panel live-signals">
+            <div class="panel-header">
+              <h2>实时异动</h2>
+              <div class="legend">
+                <span><i class="grade-a"></i>A</span>
+                <span><i class="grade-b"></i>B</span>
+                <span><i class="grade-c"></i>C</span>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>级别</th>
+                    <th>股票</th>
+                    <th>板块</th>
+                    <th>走势</th>
+                    <th>现价</th>
+                    <th>涨幅</th>
+                    <th>1m</th>
+                    <th>1m额</th>
+                    <th>主买</th>
+                    <th>评分</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="signalRows">
+                  <tr>
+                    <td colspan="11" class="empty">等待实时行情触发信号</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <aside class="desk-column context-column">
+          <section class="panel live-alert-panel">
+            <div class="panel-header">
+              <h2>即时动态</h2>
+            </div>
+            <div id="alertList" class="alert-list">
+              <div class="muted-line">等待新信号</div>
+            </div>
+            <div id="trackList" class="track-list">
+              <div class="muted-line">等待报警后表现</div>
+            </div>
+            <div id="performanceList" class="performance-list">
+              <div class="muted-line">等待统计样本</div>
+            </div>
+          </section>
+
+          <section class="panel market-context">
+            <details open>
+              <summary>板块热度</summary>
+              <div id="sectorList" class="sector-list"></div>
+            </details>
+            <details open>
+              <summary>系统状态</summary>
+              <div id="runtimeList" class="runtime-list">
+                <div class="muted-line">等待行情</div>
+              </div>
+            </details>
+            <details>
+              <summary>次日样本</summary>
+              <div class="subhead">强关注样本 <a class="mini-link" href="/api/focus/next-day/export">导出</a></div>
+              <div id="nextDayList" class="nextday-list">
+                <div class="muted-line">等待强关注样本</div>
+              </div>
+            </details>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

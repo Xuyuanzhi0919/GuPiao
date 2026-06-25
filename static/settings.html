@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>配置 | A股分时异动雷达</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>配置</h1>
+          <nav class="page-nav">
+            <a href="/">实时雷达</a>
+            <a href="/review.html">复盘</a>
+            <a href="/backtest.html">验证</a>
+            <a class="active" href="/settings.html">配置</a>
+            <a href="/diagnostics.html">诊断</a>
+          </nav>
+        </div>
+      </section>
+
+      <section class="page-grid three">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>股票池</h2>
+          </div>
+          <div class="hint">关注池用于优先观察，排除池用于屏蔽不想参与的股票。代码只填 6 位数字。</div>
+          <form id="universeForm" class="universe-form page-form">
+            <input id="universeCode" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="代码" />
+            <select id="universeList" name="list">
+              <option value="include">关注池</option>
+              <option value="exclude">排除池</option>
+            </select>
+            <button type="submit">添加</button>
+          </form>
+          <div id="universeListView" class="universe-list">
+            <div class="muted-line">读取股票池</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>板块配置</h2>
+          </div>
+          <div class="hint">手动板块会作为兜底映射；OpenTDX 已能识别的股票通常不需要重复配置。</div>
+          <form id="sectorForm" class="sector-form page-form">
+            <input id="sectorNameInput" name="sector" placeholder="板块" />
+            <input id="sectorCodeInput" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="代码" />
+            <button type="submit">添加</button>
+          </form>
+          <div id="sectorConfigList" class="sector-config-list">
+            <div class="muted-line">读取板块</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>监控阈值</h2>
+          </div>
+          <div class="hint">评分太低会增加噪音；涨速太高会漏掉缓慢启动；冷却太短会重复报警。</div>
+          <form id="configForm" class="config-form page-form">
+            <label><span>最低评分</span><input name="min_score" type="number" min="40" max="95" /></label>
+            <label><span>1m涨速%</span><input name="rise_1m_pct" type="number" min="0.2" max="5" step="0.05" /></label>
+            <label><span>3m涨速%</span><input name="rise_3m_pct" type="number" min="0.5" max="8" step="0.05" /></label>
+            <label><span>5m涨速%</span><input name="rise_5m_pct" type="number" min="0.8" max="10" step="0.05" /></label>
+            <label><span>量能倍数</span><input name="volume_spike_ratio" type="number" min="1" max="8" step="0.1" /></label>
+            <label><span>冷却秒</span><input name="signal_cooldown_sec" type="number" min="15" max="900" /></label>
+            <div class="config-actions">
+              <button type="submit">应用</button>
+              <button id="resetConfigButton" type="button">重置</button>
+            </div>
+          </form>
+        </section>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>最近参数变更</h2>
+        </div>
+        <div id="configChangeList" class="history-list">
+          <div class="muted-line">读取参数变更</div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/settings.js"></script>
+  </body>
+</html>

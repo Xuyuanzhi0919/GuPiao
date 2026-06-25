@@ -1,0 +1,16 @@
+{
+  "min_price": 2.0,
+  "min_turnover_1m": 8000000,
+  "min_turnover_today": 30000000,
+  "min_score": 55,
+  "max_distance_to_limit_pct": 1.0,
+  "rise_1m_pct": 0.65,
+  "rise_3m_pct": 1.35,
+  "rise_5m_pct": 2.0,
+  "volume_spike_ratio": 2.2,
+  "min_active_buy_ratio": 0.54,
+  "min_order_book_bias": 0.08,
+  "sector_signal_window_sec": 90,
+  "signal_cooldown_sec": 75,
+  "signal_rescore_delta": 12
+}

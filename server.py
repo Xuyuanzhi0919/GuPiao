@@ -1,0 +1,1280 @@
+from __future__ import annotations
+
+import asyncio
+import csv
+import json
+import mimetypes
+import os
+import signal
+import threading
+import time
+import uuid
+from datetime import datetime, time as dt_time
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen
+from typing import Any
+
+from market_data import create_market_data_source
+from market_quotes import fetch_market_quotes
+from market_clock import CN_TZ, ashare_session, next_trading_date
+from monitor import IntradayMonitor
+from focus_store import FocusStore
+from candidate_quality import enrich_candidates
+from config_change_store import ConfigChangeStore
+from runtime_config import load_monitor_config, reset_monitor_config, update_monitor_config
+from sectors import add_sector_code, load_sectors, remove_sector_code
+from signal_store import SignalStore, TrackStore
+from stock_search import lookup_stocks, search_stocks
+from universe import add_code, remove_code, universe_payload
+from backtest import focus_backtest
+from historical_backtest import rapid_rise_history_backtest, rapid_rise_multi_date_backtest
+from notifications import NotificationCenter
+from position_store import PositionStore
+from trade_records import TradeRecordStore
+from trade_marks import TradeMarkStore
+from user_preferences import UserPreferenceStore
+from limit_up_monitor import LimitUpMonitor
+from db_store import DatabaseStore
+
+ROOT = Path(__file__).parent
+STATIC = ROOT / "static"
+DATA = ROOT / "data"
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("PORT", "8787"))
+RECENT_ALERTS = DATA / "recent_alerts.json"
+ALERT_KEEP_SEC = int(os.environ.get("ALERT_KEEP_SEC", "600"))
+LIMIT_UP_FOCUS_STATE = DATA / "limit_up_focus_state.json"
+LIMIT_UP_BUY_SIGNAL_STATE = DATA / "limit_up_buy_signal_state.json"
+LIMIT_UP_POSITION_SIGNAL_STATE = DATA / "limit_up_position_signal_state.json"
+LIMIT_UP_SYSTEM_REVIEW_HISTORY = DATA / "limit_up_system_review_history.json"
+LIMIT_UP_SYSTEM_CAPITAL = 100000
+LIMIT_UP_SYSTEM_MAX_POSITIONS = 3
+LIMIT_UP_MONITOR_INTERVAL_SEC = float(os.environ.get("LIMIT_UP_MONITOR_INTERVAL_SEC", "5"))
+LIMIT_UP_TICK_INTERVAL_SEC = float(os.environ.get("LIMIT_UP_TICK_INTERVAL_SEC", "1"))
+
+
+class AppState:
+    def __init__(self) -> None:
+        load_monitor_config()
+        self.monitor = IntradayMonitor()
+        self.data_source = create_market_data_source()
+        self.store = SignalStore(DATA / "signals.jsonl")
+        self.track_store = TrackStore(DATA / "tracks.jsonl")
+        self.focus_store = FocusStore(DATA / "focus_next_day.json")
+        self.config_changes = ConfigChangeStore(DATA / "config_changes.jsonl")
+        self.notifications = NotificationCenter(DATA / "notifications.json")
+        self.preferences = UserPreferenceStore(DATA / "user_preferences.json")
+        self.trade_marks = TradeMarkStore(DATA / "trade_marks.json")
+        self.positions = PositionStore(DATA / "positions.json")
+        self.trade_records = TradeRecordStore(DATA / "trade_records.json")
+        self.limit_up_monitor = LimitUpMonitor(DATA)
+        self.db_store = DatabaseStore.from_env()
+        self.clients: set[asyncio.Queue[dict[str, Any]]] = set()
+        self.limit_up_clients: set[asyncio.Queue[dict[str, Any]]] = set()
+        self.limit_up_monitor_lock = asyncio.Lock()
+        self.limit_up_notification_lock = asyncio.Lock()
+        self.last_limit_up_tick_ts = 0.0
+        self.started_at = time.time()
+        self.last_batch_ts = 0.0
+        self.batch_count = 0
+        self.tick_count = 0
+        self.source_name = self.data_source.__class__.__name__
+        self.error_count = 0
+        self.retry_count = 0
+        self.last_error = ""
+        self.last_error_ts = 0.0
+        self.backtest_jobs: dict[str, dict[str, Any]] = {}
+        self.backtest_job_lock = threading.Lock()
+
+    async def publish(self, payload: dict[str, Any]) -> None:
+        stale: list[asyncio.Queue] = []
+        for queue in self.clients:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                stale.append(queue)
+        for queue in stale:
+            self.clients.discard(queue)
+
+    async def publish_limit_up(self, payload: dict[str, Any]) -> None:
+        stale: list[asyncio.Queue] = []
+        for queue in self.limit_up_clients:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                stale.append(queue)
+        for queue in stale:
+            self.limit_up_clients.discard(queue)
+
+    def mark_batch(self, tick_count: int) -> None:
+        self.last_batch_ts = time.time()
+        self.batch_count += 1
+        self.tick_count += tick_count
+
+    def mark_error(self, error: Exception) -> None:
+        self.error_count += 1
+        self.retry_count += 1
+        self.last_error = f"{error.__class__.__name__}: {error}"
+        self.last_error_ts = time.time()
+
+    def runtime_status(self) -> dict[str, Any]:
+        now = time.time()
+        data_age = now - self.last_batch_ts if self.last_batch_ts else None
+        recent_error = bool(self.last_error_ts and now - self.last_error_ts < 30)
+        session = ashare_session()
+        stale = data_age is None or (session["is_live"] and data_age > 5)
+        status = "ERROR" if recent_error else "STALE" if stale else "OK"
+        return {
+            "status": status,
+            "session": session,
+            "source": self.source_name,
+            "uptime_sec": int(now - self.started_at),
+            "last_batch_ts": self.last_batch_ts,
+            "data_age_sec": round(data_age, 2) if data_age is not None else None,
+            "batch_count": self.batch_count,
+            "tick_count": self.tick_count,
+            "client_count": len(self.clients),
+            "error_count": self.error_count,
+            "retry_count": self.retry_count,
+            "last_error": self.last_error,
+            "last_error_ts": self.last_error_ts,
+            "bad_row_count": getattr(self.data_source, "bad_row_count", 0),
+            "last_bad_row_error": getattr(self.data_source, "last_bad_row_error", ""),
+            "upstream_health": getattr(self.data_source, "upstream_health", {}),
+        }
+
+
+STATE = AppState()
+
+
+async def market_loop() -> None:
+    while True:
+        try:
+            async for ticks in STATE.data_source.stream():
+                STATE.mark_batch(len(ticks))
+                STATE.focus_store.update_ticks(ticks)
+                signals = STATE.monitor.update(ticks)
+                STATE.store.append(signals)
+                watchlist = STATE.preferences.watchlist()
+                for signal_item in signals:
+                    STATE.notifications.notify_signal(signal_item)
+                    STATE.notifications.notify_watchlist_signal(signal_item, watchlist)
+                export_recent_alerts(signals)
+                STATE.track_store.append(STATE.monitor.tracked_export_rows())
+                payload = STATE.monitor.snapshot()
+                payload["event"] = "market"
+                payload["new_signals"] = [signal.to_dict() for signal in signals]
+                payload["runtime"] = STATE.runtime_status()
+                await STATE.publish(payload)
+                await maybe_monitor_next_day_buy_signals(tick_driven=True)
+                await maybe_monitor_position_risk_signals(tick_driven=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            STATE.mark_error(error)
+            payload = snapshot_payload()
+            payload["event"] = "market"
+            payload["new_signals"] = []
+            await STATE.publish(payload)
+            await asyncio.sleep(min(10, 1 + STATE.retry_count))
+
+
+async def limit_up_focus_loop() -> None:
+    while True:
+        try:
+            await maybe_generate_tomorrow_focus()
+            await maybe_monitor_next_day_buy_signals()
+            await maybe_monitor_position_risk_signals()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            STATE.mark_error(error)
+        await asyncio.sleep(max(2, LIMIT_UP_MONITOR_INTERVAL_SEC))
+
+
+async def maybe_generate_tomorrow_focus() -> None:
+    current = datetime.now(CN_TZ)
+    session = ashare_session(current)
+    if current.time() < dt_time(15, 0):
+        return
+    date_key = str(session.get("date") or current.strftime("%Y-%m-%d"))
+    sent = _load_json_dict(LIMIT_UP_FOCUS_STATE)
+    focus_key = f"focus:{date_key}"
+    openclaw_key = f"openclaw:{date_key}"
+    if openclaw_key in sent:
+        return
+    if focus_key not in sent:
+        payload = await asyncio.to_thread(STATE.limit_up_monitor.build_tomorrow_focus, date_key, True)
+        sent[focus_key] = {"ts": time.time(), "sent": False, "channel": "state", "error": ""}
+        LIMIT_UP_FOCUS_STATE.write_text(json.dumps(sent, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = await asyncio.to_thread(STATE.limit_up_monitor.review_tomorrow_focus_with_openclaw, date_key, 120, 600)
+    notification = STATE.notifications.notify_limit_up_focus_report(payload)
+    if STATE.db_store:
+        await asyncio.to_thread(STATE.db_store.save_limit_up_focus, payload)
+    sent[openclaw_key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
+    LIMIT_UP_FOCUS_STATE.write_text(json.dumps(sent, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[str, Any] | None:
+    current = datetime.now(CN_TZ)
+    session = ashare_session(current)
+    if session.get("code") not in {"CALL_AUCTION", "PRE_OPEN", "MORNING", "AFTERNOON", "CLOSING_AUCTION"}:
+        return None
+    if tick_driven:
+        now = time.time()
+        if now - STATE.last_limit_up_tick_ts < max(0.2, LIMIT_UP_TICK_INTERVAL_SEC):
+            return None
+        if STATE.limit_up_monitor_lock.locked():
+            return None
+        STATE.last_limit_up_tick_ts = now
+    async with STATE.limit_up_monitor_lock:
+        payload = await asyncio.to_thread(STATE.limit_up_monitor.monitor_yesterday_pool, str(session.get("date") or ""), True)
+    if STATE.db_store:
+        await asyncio.to_thread(STATE.db_store.save_next_day_monitor, payload)
+    async with STATE.limit_up_notification_lock:
+        sent = _load_json_dict(LIMIT_UP_BUY_SIGNAL_STATE)
+        changed = False
+        def notification_keys(item: dict[str, Any]) -> tuple[str, str]:
+            primary = f"{payload.get('date')}:{item.get('code')}"
+            legacy = f"{payload.get('date')}:{item.get('code')}:{item.get('state')}"
+            return primary, legacy
+
+        pending_notifications = [
+            (notification_keys(item)[0], item)
+            for item in payload.get("buy_signals", [])[:10]
+            if notification_keys(item)[0] not in sent and notification_keys(item)[1] not in sent
+        ]
+        if pending_notifications:
+            notifications = await asyncio.gather(
+                *(asyncio.to_thread(STATE.notifications.notify_next_day_buy_signal, item) for _, item in pending_notifications),
+                return_exceptions=True,
+            )
+        else:
+            notifications = []
+        for (key, _item), notification in zip(pending_notifications, notifications, strict=False):
+            if isinstance(notification, Exception):
+                sent[key] = {"ts": time.time(), "sent": False, "channel": "error", "error": f"{notification.__class__.__name__}: {notification}"}
+                changed = True
+                continue
+            sent[key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
+            changed = True
+        if changed:
+            LIMIT_UP_BUY_SIGNAL_STATE.write_text(json.dumps(sent, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload["event"] = "limit-up"
+    payload["runtime"] = STATE.runtime_status()
+    payload["tick_driven"] = tick_driven
+    await STATE.publish_limit_up(payload)
+    return payload
+
+
+async def maybe_monitor_position_risk_signals(tick_driven: bool = False) -> list[dict[str, Any]]:
+    current = datetime.now(CN_TZ)
+    session = ashare_session(current)
+    if session.get("code") not in {"CALL_AUCTION", "PRE_OPEN", "MORNING", "AFTERNOON", "CLOSING_AUCTION"}:
+        return []
+    if tick_driven and STATE.limit_up_monitor_lock.locked():
+        return []
+    positions = [
+        item
+        for item in STATE.positions.payload().get("positions", [])
+        if _is_stock_position(item)
+    ]
+    if not positions:
+        return []
+    codes = [str(item.get("code") or "") for item in positions]
+    try:
+        quote_payload = await asyncio.to_thread(fetch_market_quotes, codes)
+    except Exception:
+        return []
+    quotes = quote_payload.get("quotes") or {}
+    alerts = _build_position_risk_alerts(positions, quotes, str(session.get("code") or ""))
+    if not alerts:
+        return []
+
+    state = _load_json_dict(LIMIT_UP_POSITION_SIGNAL_STATE)
+    sent: list[dict[str, Any]] = []
+    changed = False
+    date_key = str(session.get("date") or current.strftime("%Y-%m-%d"))
+    for alert in alerts:
+        key = f"{date_key}:{alert.get('code')}:{alert.get('kind')}"
+        if key in state:
+            continue
+        notification = await asyncio.to_thread(STATE.notifications.notify_position_risk, alert)
+        if notification.sent or notification.channel in {"disabled", "record"}:
+            state[key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
+            sent.append(alert)
+            changed = True
+    if changed:
+        LIMIT_UP_POSITION_SIGNAL_STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    return sent
+
+
+def _is_stock_position(item: dict[str, Any]) -> bool:
+    code = str(item.get("code") or "")
+    name = str(item.get("name") or "").upper()
+    sector = str(item.get("sector") or "").upper()
+    if "ETF" in name or "ETF" in sector or code.startswith(("51", "56", "58")):
+        return False
+    return code.startswith(("000", "001", "002", "003", "600", "601", "603", "605"))
+
+
+def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[str, Any], phase: str) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+    for position in positions:
+        code = str(position.get("code") or "")
+        quote = quotes.get(code) or {}
+        buy_price = _number(position.get("buy_price"))
+        current_price = _number(quote.get("price")) or buy_price
+        open_price = _number(quote.get("open"))
+        high_price = _number(quote.get("high")) or current_price
+        low_price = _number(quote.get("low")) or current_price
+        prev_close = _number(quote.get("prev_close"))
+        if not code or buy_price <= 0 or current_price <= 0:
+            continue
+        pnl_pct = (current_price / buy_price - 1) * 100
+        open_pct = (open_price / prev_close - 1) * 100 if open_price and prev_close else 0
+        stop_price = round(buy_price * 0.97, 3)
+        source = str(position.get("source") or "manual")
+        is_limit_up = source == "limit-up"
+        name = str(position.get("name") or quote.get("name") or code)
+        base = {
+            "code": code,
+            "name": name,
+            "price": round(current_price, 3),
+            "buy_price": round(buy_price, 3),
+            "shares": position.get("shares"),
+            "pnl_pct": round(pnl_pct, 2),
+            "source": source,
+        }
+        if is_limit_up and phase in {"CALL_AUCTION", "PRE_OPEN"}:
+            alerts.append({
+                **base,
+                "kind": "open-plan",
+                "action": "持仓开盘计划",
+                "reason": f"成本{buy_price:.2f}，止损{stop_price:.2f}；高开不追加，跌破开盘价或成本-3%先减仓。",
+            })
+            continue
+        hard_stop_pct = -3 if is_limit_up else -5
+        hard_stop_price = round(buy_price * (1 + hard_stop_pct / 100), 3)
+        if current_price <= hard_stop_price or pnl_pct <= hard_stop_pct:
+            alerts.append({
+                **base,
+                "kind": "hard-stop",
+                "action": "清仓风控",
+                "reason": f"现价较成本{pnl_pct:.2f}%，触发{hard_stop_pct}%止损线{hard_stop_price:.2f}。",
+            })
+            continue
+        if is_limit_up and open_price and current_price < open_price * 0.98 and low_price < open_price * 0.985:
+            alerts.append({
+                **base,
+                "kind": "break-open",
+                "action": "持仓减仓",
+                "reason": f"跌破开盘价2%，开盘{open_price:.2f}，现价{current_price:.2f}，优先保护本金。",
+            })
+            continue
+        high_profit_pct = (high_price / buy_price - 1) * 100 if high_price else pnl_pct
+        drawdown_from_high = (current_price / high_price - 1) * 100 if high_price else 0
+        if high_profit_pct >= (5 if is_limit_up else 8) and drawdown_from_high <= (-2 if is_limit_up else -4):
+            alerts.append({
+                **base,
+                "kind": "profit-protect",
+                "action": "冲高回落减仓",
+                "reason": f"盘中最高盈利{high_profit_pct:.2f}%，现从高点回落{abs(drawdown_from_high):.2f}%，先锁利润。",
+            })
+            continue
+        if pnl_pct >= (8 if is_limit_up else 12):
+            alerts.append({
+                **base,
+                "kind": "profit-watch",
+                "action": "持仓止盈观察",
+                "reason": f"当前盈利{pnl_pct:.2f}%，若明显回落先减仓。",
+            })
+        elif is_limit_up and open_pct <= -2 and phase in {"MORNING", "AFTERNOON"}:
+            alerts.append({
+                **base,
+                "kind": "weak-open",
+                "action": "低开弱承接",
+                "reason": f"低开{open_pct:.2f}%，若不能快速站回开盘价，按持仓减仓处理。",
+            })
+    return alerts
+
+
+def limit_up_system_review_payload(date_key: str = "") -> dict[str, Any]:
+    records = _load_limit_up_system_review_records()
+    if not records:
+        payload = {
+            "date": date_key,
+            "capital": LIMIT_UP_SYSTEM_CAPITAL,
+            "max_positions": LIMIT_UP_SYSTEM_MAX_POSITIONS,
+            "selected": None,
+            "history": [],
+            "stats": _system_review_stats([]),
+            "failure_attribution": [],
+            "dates": [],
+        }
+        LIMIT_UP_SYSTEM_REVIEW_HISTORY.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+    selected = next((item for item in records if str(item.get("date") or "") == date_key), records[-1])
+    stats = _system_review_stats(records)
+    payload = {
+        "date": selected.get("date"),
+        "capital": LIMIT_UP_SYSTEM_CAPITAL,
+        "max_positions": LIMIT_UP_SYSTEM_MAX_POSITIONS,
+        "selected": selected,
+        "history": records,
+        "stats": stats,
+        "failure_attribution": _system_failure_attribution(records),
+        "dates": [record.get("date") for record in records],
+    }
+    LIMIT_UP_SYSTEM_REVIEW_HISTORY.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
+def _load_limit_up_system_review_records() -> list[dict[str, Any]]:
+    by_date: dict[str, dict[str, Any]] = {}
+    for path in sorted(DATA.glob("limit_up_next_day_review_*.json")):
+        if path.name.endswith("_latest.json"):
+            continue
+        payload = _read_json_file(path)
+        if payload:
+            record = _build_system_review_record(payload)
+            if record:
+                by_date[str(record.get("date"))] = record
+    state_payload = _read_json_file(DATA / "limit_up_next_day_state.json")
+    if state_payload:
+        record = _build_system_review_record(state_payload)
+        if record:
+            by_date[str(record.get("date"))] = record
+    records = [by_date[key] for key in sorted(by_date)]
+    equity = LIMIT_UP_SYSTEM_CAPITAL
+    peak = LIMIT_UP_SYSTEM_CAPITAL
+    for record in records:
+        equity += _number(record.get("pnl_amount"))
+        peak = max(peak, equity)
+        record["equity"] = round(equity, 2)
+        record["drawdown_pct"] = round((equity / peak - 1) * 100, 2) if peak > 0 else 0
+    return records
+
+
+def _build_system_review_record(payload: dict[str, Any]) -> dict[str, Any] | None:
+    rows = payload.get("rows") or payload.get("top_rows") or []
+    if not isinstance(rows, list):
+        return None
+    official_rows = [
+        row for row in rows
+        if isinstance(row, dict) and (row.get("official_buy") or _number(row.get("official_rank")) > 0)
+    ]
+    official_rows.sort(key=lambda item: _number(item.get("official_rank")) or 99)
+    official_rows = official_rows[:LIMIT_UP_SYSTEM_MAX_POSITIONS]
+    allocation = LIMIT_UP_SYSTEM_CAPITAL / LIMIT_UP_SYSTEM_MAX_POSITIONS if official_rows else 0
+    review_rows = [_build_system_review_row(row, allocation) for row in official_rows]
+    pnl_amount = sum(_number(row.get("pnl_amount")) for row in review_rows)
+    invested_amount = sum(_number(row.get("invested_amount")) for row in review_rows)
+    seal_count = len([row for row in review_rows if row.get("sealed_today")])
+    hold_count = len([row for row in review_rows if row.get("position_status") == "持有中"])
+    clear_count = len([row for row in review_rows if row.get("position_status") == "已剔除"])
+    rebalance_count = len([row for row in review_rows if row.get("position_status") == "待调仓"])
+    return {
+        "date": payload.get("date") or "",
+        "source_date": payload.get("source_date") or "",
+        "ts": payload.get("ts") or time.time(),
+        "capital": LIMIT_UP_SYSTEM_CAPITAL,
+        "position_count": len(review_rows),
+        "invested_amount": round(invested_amount, 2),
+        "cash": round(LIMIT_UP_SYSTEM_CAPITAL - invested_amount, 2),
+        "pnl_amount": round(pnl_amount, 2),
+        "pnl_pct": round((pnl_amount / LIMIT_UP_SYSTEM_CAPITAL) * 100, 2),
+        "best_pnl_pct": round(max([_number(row.get("pnl_pct")) for row in review_rows], default=0), 2),
+        "worst_pnl_pct": round(min([_number(row.get("pnl_pct")) for row in review_rows], default=0), 2),
+        "seal_count": seal_count,
+        "seal_rate": round((seal_count / len(review_rows)) * 100, 2) if review_rows else 0,
+        "hold_count": hold_count,
+        "rebalance_count": rebalance_count,
+        "clear_count": clear_count,
+        "rows": review_rows,
+    }
+
+
+def _build_system_review_row(row: dict[str, Any], allocation: float) -> dict[str, Any]:
+    entry_price = _number(row.get("official_entry_price") or row.get("official_trigger_price") or row.get("open") or row.get("price"))
+    price = _number(row.get("price")) or entry_price
+    shares = int(allocation / entry_price / 100) * 100 if entry_price > 0 else 0
+    invested_amount = shares * entry_price
+    pnl_amount = shares * (price - entry_price)
+    pnl_pct = (price / entry_price - 1) * 100 if entry_price > 0 else 0
+    if shares <= 0 and entry_price > 0:
+        status, action = "已剔除", "资金不足"
+        failure_reason = "资金不足"
+    else:
+        status, action = _system_position_status(row, pnl_pct)
+        failure_reason = _system_failure_reason(row, pnl_pct)
+    return {
+        "code": row.get("code") or "",
+        "name": row.get("name") or row.get("code") or "",
+        "sector": row.get("sector") or "--",
+        "rank": int(_number(row.get("official_rank")) or 0),
+        "entry_price": round(entry_price, 3),
+        "price": round(price, 3),
+        "allocated_capital": round(allocation, 2),
+        "shares": shares,
+        "invested_amount": round(invested_amount, 2),
+        "pnl_amount": round(pnl_amount, 2),
+        "pnl_pct": round(pnl_pct, 2),
+        "change_pct": round(_number(row.get("change_pct")), 2),
+        "from_open_pct": round(_number(row.get("close_from_open_pct")) or ((price / _number(row.get("open")) - 1) * 100 if _number(row.get("open")) else 0), 2),
+        "sealed_today": bool(row.get("sealed_today")),
+        "state": row.get("state") or "",
+        "action": action,
+        "position_status": status,
+        "failure_reason": failure_reason,
+    }
+
+
+def _system_position_status(row: dict[str, Any], pnl_pct: float) -> tuple[str, str]:
+    if row.get("sealed_today") and pnl_pct >= 0:
+        return "持有中", "继续持仓"
+    if row.get("action") == "PASS" or str(row.get("state") or "") == "放弃" or pnl_pct <= -3:
+        return "已剔除", "剔除/清仓"
+    return "待调仓", "调仓观察"
+
+
+def _system_failure_reason(row: dict[str, Any], pnl_pct: float) -> str:
+    if row.get("sealed_today"):
+        return ""
+    if row.get("buy_unavailable") or str(row.get("state") or "") == "买不到":
+        return "买不到"
+    if row.get("kline_signal") == "weak":
+        return "分时弱化"
+    if _number(row.get("open_pct")) > 2 and _number(row.get("close_from_open_pct")) < -2:
+        return "高开低走"
+    if _number(row.get("today_open_board_count")) > 0:
+        return "炸板回落"
+    if pnl_pct <= -3:
+        return "止损触发"
+    if not row.get("sealed_today"):
+        return "未封板"
+    return "其他"
+
+
+def _system_review_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
+    active_records = [record for record in records if int(_number(record.get("position_count"))) > 0]
+    if not active_records:
+        return {
+            "trade_days": 0,
+            "equity": LIMIT_UP_SYSTEM_CAPITAL,
+            "total_pnl": 0,
+            "total_return_pct": 0,
+            "win_rate": 0,
+            "max_drawdown_pct": 0,
+            "loss_streak": 0,
+        }
+    equity = _number(records[-1].get("equity")) or LIMIT_UP_SYSTEM_CAPITAL
+    max_drawdown = min((_number(record.get("drawdown_pct")) for record in active_records), default=0)
+    win_days = len([record for record in active_records if _number(record.get("pnl_amount")) > 0])
+    loss_streak = 0
+    current_streak = 0
+    for record in active_records:
+        if _number(record.get("pnl_amount")) < 0:
+            current_streak += 1
+            loss_streak = max(loss_streak, current_streak)
+        else:
+            current_streak = 0
+    return {
+        "trade_days": len(active_records),
+        "equity": round(equity, 2),
+        "total_pnl": round(equity - LIMIT_UP_SYSTEM_CAPITAL, 2),
+        "total_return_pct": round((equity / LIMIT_UP_SYSTEM_CAPITAL - 1) * 100, 2),
+        "win_rate": round((win_days / len(active_records)) * 100, 2),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "loss_streak": loss_streak,
+    }
+
+
+def _system_failure_attribution(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for record in records:
+        for row in record.get("rows") or []:
+            reason = str(row.get("failure_reason") or "")
+            if reason:
+                counts[reason] = counts.get(reason, 0) + 1
+    return [{"reason": key, "count": value} for key, value in sorted(counts.items(), key=lambda item: item[1], reverse=True)]
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        request = await reader.readuntil(b"\r\n\r\n")
+    except asyncio.IncompleteReadError:
+        writer.close()
+        await writer.wait_closed()
+        return
+
+    request_line = request.split(b"\r\n", 1)[0].decode("utf-8", errors="ignore")
+    parts = request_line.split()
+    raw_path = parts[1] if len(parts) >= 2 else "/"
+    parsed = urlparse(raw_path)
+    path = parsed.path
+    query = parse_qs(parsed.query)
+
+    if path == "/events":
+        await stream_events(writer)
+        return
+    if path == "/api/snapshot":
+        await send_json(writer, snapshot_payload())
+        return
+    if path == "/api/report":
+        report = STATE.monitor.report()
+        if not report["tracked_alerts"]:
+            report["tracked_alerts"] = STATE.track_store.latest(limit=100)[:10]
+        await send_json(writer, {"report": report, "runtime": STATE.runtime_status()})
+        return
+    if path == "/api/candidates":
+        await send_json(writer, await candidate_payload())
+        return
+    if path == "/api/health/full":
+        await send_json(writer, await full_health_payload())
+        return
+    if path == "/api/notifications/recent":
+        limit = int(query.get("limit", ["50"])[0])
+        await send_json(writer, notification_payload(limit))
+        return
+    if path == "/api/notifications/config":
+        values = {key: value[0] for key, value in query.items()}
+        STATE.notifications.update_config(values)
+        await send_json(writer, notification_payload())
+        return
+    if path == "/api/notifications/test":
+        result = STATE.notifications.test()
+        payload = notification_payload()
+        payload["test"] = result.__dict__
+        await send_json(writer, payload)
+        return
+    if path == "/api/limit-up/state":
+        force = query.get("force", ["0"])[0] == "1"
+        await send_json(writer, await limit_up_payload(force=force, notify=False))
+        return
+    if path == "/api/limit-up/refresh":
+        notify = query.get("notify", ["0"])[0] == "1"
+        await send_json(writer, await limit_up_payload(force=True, notify=notify))
+        return
+    if path == "/api/limit-up/tomorrow-focus":
+        trade_date = query.get("date", [""])[0] or None
+        notify = query.get("notify", ["0"])[0] == "1"
+        payload = await asyncio.to_thread(STATE.limit_up_monitor.build_tomorrow_focus, trade_date, True)
+        if STATE.db_store:
+            await asyncio.to_thread(STATE.db_store.save_limit_up_focus, payload)
+        if notify:
+            notification = STATE.notifications.notify_limit_up_focus_report(payload)
+            payload["notification"] = notification.__dict__
+        await send_json(writer, payload)
+        return
+    if path == "/api/limit-up/openclaw-review":
+        trade_date = query.get("date", [""])[0] or None
+        notify = query.get("notify", ["0"])[0] == "1"
+        max_items = int(query.get("max_items", ["120"])[0] or 120)
+        timeout = int(query.get("timeout", ["600"])[0] or 600)
+        payload = await asyncio.to_thread(STATE.limit_up_monitor.review_tomorrow_focus_with_openclaw, trade_date, max_items, timeout)
+        if STATE.db_store:
+            await asyncio.to_thread(STATE.db_store.save_limit_up_focus, payload)
+        if notify:
+            notification = STATE.notifications.notify_limit_up_focus_report(payload)
+            payload["notification"] = notification.__dict__
+        await send_json(writer, payload)
+        return
+    if path == "/api/limit-up/next-day-monitor":
+        trade_date = query.get("date", [""])[0] or None
+        notify = query.get("notify", ["0"])[0] == "1"
+        payload = await asyncio.to_thread(STATE.limit_up_monitor.monitor_yesterday_pool, trade_date, True)
+        if STATE.db_store:
+            await asyncio.to_thread(STATE.db_store.save_next_day_monitor, payload)
+        sent = []
+        if notify:
+            for item in payload.get("buy_signals", [])[:10]:
+                notification = STATE.notifications.notify_next_day_buy_signal(item)
+                sent.append(notification.__dict__)
+        payload["notifications"] = sent
+        await send_json(writer, payload)
+        return
+    if path == "/api/limit-up/system-review":
+        trade_date = query.get("date", [""])[0]
+        await send_json(writer, await asyncio.to_thread(limit_up_system_review_payload, trade_date))
+        return
+    if path == "/api/preferences":
+        await send_json(writer, {"preferences": STATE.preferences.payload()})
+        return
+    if path == "/api/preferences/add":
+        list_name = query.get("list", ["watchlist"])[0]
+        code = query.get("code", [""])[0]
+        await send_json(writer, {"preferences": STATE.preferences.add(list_name, code)})
+        return
+    if path == "/api/preferences/remove":
+        list_name = query.get("list", ["watchlist"])[0]
+        code = query.get("code", [""])[0]
+        await send_json(writer, {"preferences": STATE.preferences.remove(list_name, code)})
+        return
+    if path == "/api/trade-marks":
+        await send_json(writer, STATE.trade_marks.payload())
+        return
+    if path == "/api/trade-marks/set":
+        code = query.get("code", [""])[0]
+        mark = query.get("mark", [""])[0]
+        await send_json(writer, STATE.trade_marks.set(code, mark))
+        return
+    if path == "/api/trade-marks/remove":
+        code = query.get("code", [""])[0]
+        await send_json(writer, STATE.trade_marks.remove(code))
+        return
+    if path == "/api/market/quotes":
+        codes = query.get("codes", [""])[0]
+        try:
+            await send_json(writer, await asyncio.to_thread(fetch_market_quotes, codes))
+        except Exception as error:
+            await send_json(writer, {"quotes": {}, "source": "eastmoney", "ts": time.time(), "error": f"{error.__class__.__name__}: {error}"})
+        return
+    if path == "/api/positions":
+        await send_json(writer, STATE.positions.payload())
+        return
+    if path == "/api/positions/upsert":
+        await send_json(
+            writer,
+            STATE.positions.upsert(
+                code=query.get("code", [""])[0],
+                name=query.get("name", [""])[0],
+                sector=query.get("sector", [""])[0],
+                price=query.get("price", ["0"])[0],
+                shares=query.get("shares", ["0"])[0],
+                source=query.get("source", [""])[0],
+            ),
+        )
+        return
+    if path == "/api/positions/remove":
+        code = query.get("code", [""])[0]
+        await send_json(writer, STATE.positions.remove(code))
+        return
+    if path == "/api/trade-records":
+        limit = int(query.get("limit", ["100"])[0])
+        await send_json(writer, STATE.trade_records.payload(limit=limit))
+        return
+    if path == "/api/trade-records/add":
+        await send_json(
+            writer,
+            STATE.trade_records.add(
+                code=query.get("code", [""])[0],
+                name=query.get("name", [""])[0],
+                sector=query.get("sector", [""])[0],
+                side=query.get("side", [""])[0],
+                price=query.get("price", ["0"])[0],
+                shares=query.get("shares", ["0"])[0],
+                reason=query.get("reason", [""])[0],
+                source=query.get("source", [""])[0],
+            ),
+        )
+        return
+    if path == "/api/notifications/position-risk":
+        item = {
+            "code": query.get("code", [""])[0],
+            "name": query.get("name", [""])[0],
+            "action": query.get("action", [""])[0],
+            "price": query.get("price", [""])[0],
+            "reason": query.get("reason", [""])[0],
+        }
+        notification = STATE.notifications.notify_position_risk(item)
+        await send_json(writer, {"notification": notification.__dict__})
+        return
+    if path == "/api/notifications/execution-alert":
+        item = {
+            "code": query.get("code", [""])[0],
+            "name": query.get("name", [""])[0],
+            "action": query.get("action", [""])[0],
+            "price": query.get("price", [""])[0],
+            "reason": query.get("reason", [""])[0],
+        }
+        notification = STATE.notifications.notify_execution_alert(item)
+        await send_json(writer, {"notification": notification.__dict__})
+        return
+    if path == "/api/stocks/search":
+        q = query.get("q", [""])[0]
+        limit = int(query.get("limit", ["20"])[0])
+        await send_json(writer, search_stocks(q, limit))
+        return
+    if path == "/api/stocks/lookup":
+        codes = query.get("codes", [""])[0]
+        await send_json(writer, lookup_stocks(codes))
+        return
+    if path == "/api/focus/next-day":
+        limit = int(query.get("limit", ["100"])[0])
+        include_shadow = query.get("include_shadow", ["0"])[0] == "1"
+        await send_json(writer, {"records": STATE.focus_store.latest(limit=max(1, min(limit, 1000)), include_shadow=include_shadow)})
+        return
+    if path == "/api/focus/strategy":
+        limit = int(query.get("days", ["30"])[0])
+        await send_json(writer, STATE.focus_store.strategy_summary(limit_days=max(1, min(limit, 120))))
+        return
+    if path == "/api/focus/advice":
+        limit = int(query.get("limit", ["300"])[0])
+        await send_json(writer, STATE.focus_store.advice_summary(limit=max(1, min(limit, 2000))))
+        return
+    if path == "/api/backtest/focus":
+        limit = int(query.get("limit", ["1000"])[0])
+        params = {
+            "entry": query.get("entry", ["trigger"])[0],
+            "exit": query.get("exit", ["m5"])[0],
+            "include_shadow": query.get("include_shadow", ["0"])[0] == "1",
+            "min_intraday_score": float(query.get("min_intraday_score", ["0"])[0] or 0),
+            "min_review_score": float(query.get("min_review_score", ["0"])[0] or 0),
+            "min_score": float(query.get("min_score", ["0"])[0] or 0),
+            "limit": max(1, min(limit, 5000)),
+        }
+        await send_json(writer, focus_backtest(STATE.focus_store.latest(limit=10000, include_shadow=True), params))
+        return
+    if path == "/api/backtest/history-rapid":
+        params = history_backtest_params(query)
+        try:
+            handler = rapid_rise_multi_date_backtest if params.get("dates") else rapid_rise_history_backtest
+            await send_json(writer, handler(params))
+        except Exception as error:
+            await send_json(writer, {"error": f"{error.__class__.__name__}: {error}", "params": params}, status="500 Internal Server Error")
+        return
+    if path == "/api/backtest/history-rapid/start":
+        params = history_backtest_params(query)
+        job = start_history_backtest_job(params)
+        await send_json(writer, {"job_id": job["id"], "job": job})
+        return
+    if path == "/api/backtest/history-rapid/job":
+        job_id = query.get("id", [""])[0]
+        await send_json(writer, {"job": get_history_backtest_job(job_id)})
+        return
+    if path == "/api/focus/next-day/export":
+        csv_path = STATE.focus_store.export_csv(DATA / "focus_next_day.csv")
+        await send_file(writer, csv_path, "text/csv; charset=utf-8")
+        return
+    if path == "/api/signals/history":
+        limit = int(query.get("limit", ["200"])[0])
+        await send_json(writer, {"signals": STATE.store.latest(limit=max(1, min(limit, 1000)))})
+        return
+    if path == "/api/signals/export":
+        csv_path = STATE.store.export_csv(DATA / "signals.csv")
+        await send_file(writer, csv_path, "text/csv; charset=utf-8")
+        return
+    if path == "/api/tracks/export":
+        csv_path = export_tracks_csv(DATA / "tracks.csv")
+        await send_file(writer, csv_path, "text/csv; charset=utf-8")
+        return
+    if path == "/api/config/update":
+        values = {key: value[0] for key, value in query.items()}
+        before = dict(load_monitor_config())
+        after = dict(update_monitor_config(values))
+        STATE.config_changes.append(before, after, action="update")
+        await send_json(writer, {"config": after})
+        return
+    if path == "/api/config/reset":
+        before = dict(load_monitor_config())
+        after = dict(reset_monitor_config())
+        STATE.config_changes.append(before, after, action="reset")
+        await send_json(writer, {"config": after})
+        return
+    if path == "/api/config/changes":
+        limit = int(query.get("limit", ["30"])[0])
+        await send_json(writer, {"changes": STATE.config_changes.latest(limit=max(1, min(limit, 200)))})
+        return
+    if path == "/api/universe":
+        await send_json(writer, {"universe": universe_payload()})
+        return
+    if path == "/api/universe/add":
+        list_name = query.get("list", ["include"])[0]
+        code = query.get("code", [""])[0]
+        await send_json(writer, {"universe": add_code(list_name, code)})
+        return
+    if path == "/api/universe/remove":
+        list_name = query.get("list", ["include"])[0]
+        code = query.get("code", [""])[0]
+        await send_json(writer, {"universe": remove_code(list_name, code)})
+        return
+    if path == "/api/sectors":
+        await send_json(writer, {"sectors": load_sectors()})
+        return
+    if path == "/api/sectors/add":
+        sector = query.get("sector", [""])[0]
+        code = query.get("code", [""])[0]
+        await send_json(writer, {"sectors": add_sector_code(sector, code)})
+        return
+    if path == "/api/sectors/remove":
+        sector = query.get("sector", [""])[0]
+        code = query.get("code", [""])[0]
+        await send_json(writer, {"sectors": remove_sector_code(sector, code)})
+        return
+
+    await send_static(writer, path)
+
+
+async def stream_events(writer: asyncio.StreamWriter) -> None:
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=5)
+    STATE.clients.add(queue)
+    headers = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream; charset=utf-8\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\n\r\n"
+    )
+    writer.write(headers.encode("utf-8"))
+    writer.write(b"event: snapshot\n")
+    writer.write(f"data: {json.dumps(snapshot_payload(), ensure_ascii=False)}\n\n".encode("utf-8"))
+    await writer.drain()
+
+    try:
+        while True:
+            payload = await queue.get()
+            writer.write(b"event: market\n")
+            writer.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
+            await writer.drain()
+    except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+        pass
+    finally:
+        STATE.clients.discard(queue)
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+
+
+async def send_json(writer: asyncio.StreamWriter, payload: dict[str, Any], status: str = "200 OK") -> None:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    writer.write(
+        f"HTTP/1.1 {status}\r\n".encode("utf-8")
+        + b"Content-Type: application/json; charset=utf-8\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+        + body
+    )
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
+async def send_file(writer: asyncio.StreamWriter, file_path: Path, content_type: str) -> None:
+    body = file_path.read_bytes()
+    writer.write(
+        b"HTTP/1.1 200 OK\r\n"
+        + f"Content-Type: {content_type}\r\n".encode("utf-8")
+        + f"Content-Length: {len(body)}\r\n".encode("utf-8")
+        + f"Content-Disposition: attachment; filename={file_path.name}\r\n\r\n".encode("utf-8")
+        + body
+    )
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
+def export_tracks_csv(target: Path) -> Path:
+    rows = STATE.monitor.tracked_export_rows()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "trigger_ts",
+        "age_sec",
+        "grade",
+        "score",
+        "code",
+        "name",
+        "sector",
+        "trigger_price",
+        "current_price",
+        "current_return_pct",
+        "max_return_pct",
+        "min_return_pct",
+    ]
+    with target.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+    return target
+
+
+def snapshot_payload() -> dict[str, Any]:
+    payload = STATE.monitor.snapshot()
+    payload["runtime"] = STATE.runtime_status()
+    return payload
+
+
+def notification_payload(limit: int = 50) -> dict[str, Any]:
+    return {
+        "notifications": STATE.notifications.latest(limit=max(1, min(limit, 200))),
+        "status": STATE.notifications.status(watchlist_count=len(STATE.preferences.watchlist())),
+    }
+
+
+async def limit_up_payload(force: bool = False, notify: bool = False) -> dict[str, Any]:
+    payload = await asyncio.to_thread(
+        STATE.limit_up_monitor.payload,
+        STATE.preferences.watchlist(),
+        force,
+        notify,
+    )
+    sent = []
+    if notify:
+        for item in payload.get("signals", [])[:8]:
+            notification = STATE.notifications.notify_limit_up_signal(item)
+            sent.append(notification.__dict__)
+    payload["notifications"] = sent
+    if STATE.db_store:
+        await asyncio.to_thread(STATE.db_store.save_limit_up_payload, payload)
+        payload["database"] = STATE.db_store.status()
+    return payload
+
+
+async def candidate_payload() -> dict[str, Any]:
+    url = getattr(STATE.data_source, "url", "")
+    if not url:
+        return {"candidates": [], "health": {}, "error": "当前数据源不支持候选池详情"}
+    candidate_url = url.replace("/ticks", "/candidates")
+    try:
+        payload = enrich_candidates(await asyncio.to_thread(fetch_json, candidate_url))
+        STATE.focus_store.record_candidates(payload)
+        STATE.notifications.notify_focus_candidates(payload)
+        STATE.notifications.notify_sector_pulse(payload)
+        return payload
+    except Exception as error:
+        return {"candidates": [], "health": {}, "error": f"{error.__class__.__name__}: {error}"}
+
+
+async def full_health_payload() -> dict[str, Any]:
+    runtime = STATE.runtime_status()
+    candidate = await candidate_payload()
+    tdx = await optional_health(os.environ.get("TDX_HEALTH_URL", "http://127.0.0.1:9002/health"))
+    tickdb = await optional_health(os.environ.get("TICKDB_HEALTH_URL", "http://127.0.0.1:9001/health"))
+    focus_records = STATE.focus_store.latest(limit=200, include_shadow=True)
+    session = runtime.get("session", {})
+    components = {
+        "main": component(runtime.get("status") != "ERROR", runtime.get("status", "--"), f"delay={runtime.get('data_age_sec')}s"),
+        "candidates": component(not candidate.get("error") and len(candidate.get("candidates", [])) > 0, f"{len(candidate.get('candidates', []))} candidates", candidate.get("error", "")),
+        "tdx": component(bool(tdx.get("ok")), tdx.get("label", "--"), tdx.get("error", "")),
+        "tickdb": component(bool(tickdb.get("ok")), tickdb.get("label", "--"), tickdb.get("error", ""), required=False),
+        "database": component(not STATE.db_store or not STATE.db_store.last_error, "postgres enabled" if STATE.db_store else "file storage", STATE.db_store.last_error if STATE.db_store else "", required=False),
+        "calendar": component(True, f"{session.get('date')} -> {next_trading_date(session.get('date')) if session.get('date') else '--'}", session.get("label", "")),
+        "focus_next_day": component(bool(focus_records), f"{len(focus_records)} records", "waiting samples" if not focus_records else ""),
+    }
+    required_ok = all(item["ok"] for item in components.values() if item["required"])
+    return {
+        "status": "OK" if required_ok else "WARN",
+        "components": components,
+        "runtime": runtime,
+        "candidate_health": candidate.get("health", {}),
+        "strategy_funnel": candidate.get("strategy_funnel", []),
+    }
+
+
+async def optional_health(url: str) -> dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(fetch_json, url)
+        label = payload.get("source") or payload.get("status") or "ok"
+        connected = payload.get("connected")
+        ok = not payload.get("last_error") and connected is not False
+        return {"ok": ok, "label": str(label), "payload": payload}
+    except Exception as error:
+        return {"ok": False, "label": "unreachable", "error": f"{error.__class__.__name__}: {error}"}
+
+
+def component(ok: bool, label: str, detail: str = "", required: bool = True) -> dict[str, Any]:
+    return {"ok": ok, "label": label, "detail": detail, "required": required}
+
+
+def fetch_json(url: str) -> dict[str, Any]:
+    with urlopen(url, timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("候选池接口必须返回对象")
+    return payload
+
+
+def history_backtest_params(query: dict[str, list[str]]) -> dict[str, Any]:
+    return {
+        "date": query.get("date", [""])[0],
+        "dates": query.get("dates", [""])[0],
+        "codes": query.get("codes", [""])[0],
+        "max_symbols": int(query.get("max_symbols", ["50"])[0] or 50),
+        "rise_1m": float(query.get("rise_1m", ["0.7"])[0] or 0.7),
+        "rise_3m": float(query.get("rise_3m", ["1.2"])[0] or 1.2),
+        "min_amount_2m": float(query.get("min_amount_2m", ["5000000"])[0] or 0),
+        "max_day_change": float(query.get("max_day_change", ["7.5"])[0] or 7.5),
+        "cooldown_min": int(query.get("cooldown_min", ["10"])[0] or 10),
+        "max_signals": int(query.get("max_signals", ["300"])[0] or 300),
+        "include_bj": query.get("include_bj", ["0"])[0] == "1",
+        "include_gem": query.get("include_gem", ["0"])[0] == "1",
+        "include_star": query.get("include_star", ["0"])[0] == "1",
+        "require_limit_up": query.get("require_limit_up", ["0"])[0] == "1",
+    }
+
+
+def start_history_backtest_job(params: dict[str, Any]) -> dict[str, Any]:
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "id": job_id,
+        "status": "RUNNING",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "progress": 0,
+        "scanned": 0,
+        "total": max(1, int(params.get("max_symbols", 1) or 1)),
+        "message": "准备开始",
+        "params": params,
+        "result": None,
+        "error": "",
+    }
+    with STATE.backtest_job_lock:
+        STATE.backtest_jobs[job_id] = job
+        if len(STATE.backtest_jobs) > 20:
+            oldest = sorted(STATE.backtest_jobs.values(), key=lambda item: item.get("created_at", 0))[0]
+            STATE.backtest_jobs.pop(oldest["id"], None)
+
+    thread = threading.Thread(target=run_history_backtest_job, args=(job_id, params), daemon=True)
+    thread.start()
+    return dict(job)
+
+
+def get_history_backtest_job(job_id: str) -> dict[str, Any]:
+    with STATE.backtest_job_lock:
+        job = STATE.backtest_jobs.get(job_id)
+        if not job:
+            return {"id": job_id, "status": "NOT_FOUND", "progress": 0, "message": "任务不存在"}
+        return dict(job)
+
+
+def run_history_backtest_job(job_id: str, params: dict[str, Any]) -> None:
+    def update_progress(**state: Any) -> None:
+        scanned = int(state.get("scanned") or 0)
+        total = max(1, int(state.get("total") or params.get("max_symbols", 1) or 1))
+        with STATE.backtest_job_lock:
+            job = STATE.backtest_jobs.get(job_id)
+            if not job:
+                return
+            job["scanned"] = scanned
+            job["total"] = total
+            job["progress"] = min(99, round(scanned / total * 100))
+            job["message"] = str(state.get("message") or job.get("message") or "")
+            job["updated_at"] = time.time()
+
+    try:
+        handler = rapid_rise_multi_date_backtest if params.get("dates") else rapid_rise_history_backtest
+        result = handler(params, progress=update_progress)
+        with STATE.backtest_job_lock:
+            job = STATE.backtest_jobs[job_id]
+            job["status"] = "DONE"
+            job["progress"] = 100
+            job["result"] = result
+            job["message"] = "完成"
+            job["updated_at"] = time.time()
+    except Exception as error:
+        with STATE.backtest_job_lock:
+            job = STATE.backtest_jobs.get(job_id)
+            if job:
+                job["status"] = "ERROR"
+                job["error"] = f"{error.__class__.__name__}: {error}"
+                job["message"] = "失败"
+                job["updated_at"] = time.time()
+
+
+def export_recent_alerts(signals: list[Any]) -> None:
+    now = time.time()
+    existing: dict[str, dict[str, Any]] = {}
+    if RECENT_ALERTS.exists():
+        try:
+            payload = json.loads(RECENT_ALERTS.read_text(encoding="utf-8"))
+            for item in payload.get("alerts", []):
+                if now - float(item.get("ts", 0)) <= ALERT_KEEP_SEC:
+                    existing[str(item.get("code", ""))] = item
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            existing = {}
+
+    for signal in signals:
+        item = signal.to_dict()
+        existing[item["code"]] = {
+            "code": item["code"],
+            "name": item["name"],
+            "grade": item["grade"],
+            "score": item["score"],
+            "ts": now,
+        }
+
+    RECENT_ALERTS.parent.mkdir(parents=True, exist_ok=True)
+    RECENT_ALERTS.write_text(
+        json.dumps({"updated_at": now, "keep_sec": ALERT_KEEP_SEC, "alerts": list(existing.values())}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+async def send_static(writer: asyncio.StreamWriter, path: str) -> None:
+    if path == "/":
+        path = "/index.html"
+    file_path = (STATIC / path.lstrip("/")).resolve()
+    if not str(file_path).startswith(str(STATIC.resolve())) or not file_path.exists():
+        body = b"Not found"
+        writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\n" + body)
+    else:
+        body = file_path.read_bytes()
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            + f"Content-Type: {content_type}; charset=utf-8\r\n".encode("utf-8")
+            + f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+            + body
+        )
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
+async def main() -> None:
+    server = await asyncio.start_server(handle_client, HOST, PORT)
+    market_task = asyncio.create_task(market_loop())
+    limit_up_task = asyncio.create_task(limit_up_focus_loop())
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+
+    print(f"分时异动雷达已启动: http://{HOST}:{PORT}")
+    async with server:
+        serve_task = asyncio.create_task(server.serve_forever())
+        await stop_event.wait()
+        server.close()
+        await server.wait_closed()
+        serve_task.cancel()
+        market_task.cancel()
+        limit_up_task.cancel()
+        await asyncio.gather(serve_task, market_task, limit_up_task, return_exceptions=True)
+    print("分时异动雷达已停止")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
