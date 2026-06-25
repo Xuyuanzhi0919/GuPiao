@@ -50,6 +50,8 @@ LIMIT_UP_POSITION_SIGNAL_STATE = DATA / "limit_up_position_signal_state.json"
 LIMIT_UP_SYSTEM_REVIEW_HISTORY = DATA / "limit_up_system_review_history.json"
 LIMIT_UP_SYSTEM_CAPITAL = 100000
 LIMIT_UP_SYSTEM_MAX_POSITIONS = 3
+LIMIT_UP_SYSTEM_FEE_RATE = 0.00025
+LIMIT_UP_SYSTEM_SLIPPAGE_RATE = 0.001
 LIMIT_UP_MONITOR_INTERVAL_SEC = float(os.environ.get("LIMIT_UP_MONITOR_INTERVAL_SEC", "5"))
 LIMIT_UP_TICK_INTERVAL_SEC = float(os.environ.get("LIMIT_UP_TICK_INTERVAL_SEC", "1"))
 
@@ -411,6 +413,9 @@ def limit_up_system_review_payload(date_key: str = "") -> dict[str, Any]:
             "history": [],
             "stats": _system_review_stats([]),
             "failure_attribution": [],
+            "positions": [],
+            "trades": [],
+            "rules": _system_review_rules(None, []),
             "dates": [],
         }
         LIMIT_UP_SYSTEM_REVIEW_HISTORY.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -425,6 +430,9 @@ def limit_up_system_review_payload(date_key: str = "") -> dict[str, Any]:
         "history": records,
         "stats": stats,
         "failure_attribution": _system_failure_attribution(records),
+        "positions": selected.get("ending_positions") or [],
+        "trades": selected.get("trades") or [],
+        "rules": _system_review_rules(selected, records),
         "dates": [record.get("date") for record in records],
     }
     LIMIT_UP_SYSTEM_REVIEW_HISTORY.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -438,26 +446,346 @@ def _load_limit_up_system_review_records() -> list[dict[str, Any]]:
             continue
         payload = _read_json_file(path)
         if payload:
-            record = _build_system_review_record(payload)
+            record = _build_raw_system_day(payload)
             if record:
                 by_date[str(record.get("date"))] = record
     state_payload = _read_json_file(DATA / "limit_up_next_day_state.json")
     if state_payload:
-        record = _build_system_review_record(state_payload)
+        record = _build_raw_system_day(state_payload)
         if record:
             by_date[str(record.get("date"))] = record
-    records = [by_date[key] for key in sorted(by_date)]
-    equity = LIMIT_UP_SYSTEM_CAPITAL
-    peak = LIMIT_UP_SYSTEM_CAPITAL
-    for record in records:
-        equity += _number(record.get("pnl_amount"))
+    return _simulate_limit_up_account([by_date[key] for key in sorted(by_date)])
+
+
+def _build_raw_system_day(payload: dict[str, Any]) -> dict[str, Any] | None:
+    rows = payload.get("rows") or payload.get("top_rows") or []
+    if not isinstance(rows, list):
+        return None
+    date_key = str(payload.get("date") or "")
+    rows_by_code = {str(row.get("code") or ""): row for row in rows if isinstance(row, dict)}
+    official_rows = _official_rows_for_date(date_key, rows_by_code)
+    if not official_rows:
+        official_rows = [
+            row for row in rows
+            if isinstance(row, dict) and (row.get("official_buy") or _number(row.get("official_rank")) > 0)
+        ]
+    official_rows.sort(key=lambda item: _number(item.get("official_rank")) or 99)
+    return {
+        "date": date_key,
+        "source_date": payload.get("source_date") or "",
+        "ts": payload.get("ts") or time.time(),
+        "rows": rows,
+        "rows_by_code": rows_by_code,
+        "official_rows": official_rows[:LIMIT_UP_SYSTEM_MAX_POSITIONS],
+        "summary": payload.get("summary") or {},
+    }
+
+
+def _official_rows_for_date(date_key: str, rows_by_code: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    if not date_key:
+        return []
+    path = DATA / f"limit_up_official_buys_{date_key}.json"
+    payload = _read_json_file(path)
+    codes = [str(code) for code in payload.get("codes") or [] if str(code)]
+    items = {str(item.get("code") or ""): item for item in payload.get("items") or [] if isinstance(item, dict)}
+    official_rows: list[dict[str, Any]] = []
+    for index, code in enumerate(codes[:LIMIT_UP_SYSTEM_MAX_POSITIONS], start=1):
+        base = dict(rows_by_code.get(code) or {})
+        item = items.get(code) or {}
+        base.update({key: value for key, value in item.items() if value not in (None, "")})
+        base["code"] = code
+        base["official_buy"] = True
+        base["official_rank"] = int(_number(base.get("official_rank")) or index)
+        base["official_entry_price"] = _number(base.get("official_entry_price") or base.get("entry_price") or base.get("trigger_price") or base.get("price") or base.get("open"))
+        base["official_trigger_price"] = _number(base.get("official_trigger_price") or base.get("trigger_price") or base.get("official_entry_price"))
+        official_rows.append(base)
+    return official_rows
+
+
+def _simulate_limit_up_account(days: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cash = float(LIMIT_UP_SYSTEM_CAPITAL)
+    peak = float(LIMIT_UP_SYSTEM_CAPITAL)
+    positions: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    previous_equity = float(LIMIT_UP_SYSTEM_CAPITAL)
+    for day in days:
+        rows_by_code = day.get("rows_by_code") or {}
+        trades: list[dict[str, Any]] = []
+        review_rows: list[dict[str, Any]] = []
+        start_equity = previous_equity
+        updated_positions: list[dict[str, Any]] = []
+
+        for position in positions:
+            row = rows_by_code.get(str(position.get("code") or "")) or {}
+            reviewed = _review_existing_system_position(position, row, str(day.get("date") or ""))
+            review_rows.append(reviewed)
+            if reviewed.get("exit"):
+                cash += _number(reviewed.get("exit_amount")) - _number(reviewed.get("fee"))
+                trades.append(_system_trade("sell", reviewed, day, reviewed.get("action") or "卖出"))
+            else:
+                updated_positions.append(_position_from_review_row(reviewed))
+        positions = updated_positions
+
+        buy_capacity = max(0, LIMIT_UP_SYSTEM_MAX_POSITIONS - len(positions))
+        buy_rows = []
+        held_codes = {str(item.get("code") or "") for item in positions}
+        for row in day.get("official_rows") or []:
+            code = str(row.get("code") or "")
+            if not code or code in held_codes:
+                continue
+            if len(buy_rows) >= buy_capacity:
+                break
+            buy_rows.append(row)
+
+        for index, row in enumerate(buy_rows):
+            remaining_slots = max(1, buy_capacity - index)
+            allocation = cash / remaining_slots
+            bought = _build_system_buy_row(row, allocation, str(day.get("date") or ""))
+            review_rows.append(bought)
+            if bought.get("shares", 0) > 0:
+                cash -= _number(bought.get("invested_amount")) + _number(bought.get("fee"))
+                positions.append(_position_from_review_row(bought))
+                trades.append(_system_trade("buy", bought, day, bought.get("action") or "买入"))
+
+        ending_positions = [_mark_to_market_position(item, rows_by_code) for item in positions]
+        market_value = sum(_number(item.get("market_value")) for item in ending_positions)
+        equity = cash + market_value
+        pnl_amount = equity - start_equity
         peak = max(peak, equity)
-        record["equity"] = round(equity, 2)
-        record["drawdown_pct"] = round((equity / peak - 1) * 100, 2) if peak > 0 else 0
+        active_rows = [row for row in review_rows if row.get("trade_action") in {"buy", "hold", "sell"}]
+        seal_count = len([row for row in active_rows if row.get("sealed_today")])
+        hold_count = len([row for row in active_rows if row.get("position_status") == "持有中"])
+        clear_count = len([row for row in active_rows if row.get("position_status") == "已剔除"])
+        rebalance_count = len([row for row in active_rows if row.get("position_status") == "待调仓"])
+        record = {
+            "date": day.get("date") or "",
+            "source_date": day.get("source_date") or "",
+            "ts": day.get("ts") or time.time(),
+            "capital": LIMIT_UP_SYSTEM_CAPITAL,
+            "start_equity": round(start_equity, 2),
+            "cash": round(cash, 2),
+            "market_value": round(market_value, 2),
+            "equity": round(equity, 2),
+            "pnl_amount": round(pnl_amount, 2),
+            "pnl_pct": round((pnl_amount / start_equity) * 100, 2) if start_equity > 0 else 0,
+            "total_return_pct": round((equity / LIMIT_UP_SYSTEM_CAPITAL - 1) * 100, 2),
+            "drawdown_pct": round((equity / peak - 1) * 100, 2) if peak > 0 else 0,
+            "position_count": len(ending_positions),
+            "invested_amount": round(sum(_number(row.get("invested_amount")) for row in review_rows if row.get("trade_action") != "sell"), 2),
+            "best_pnl_pct": round(max([_number(row.get("pnl_pct")) for row in active_rows], default=0), 2),
+            "worst_pnl_pct": round(min([_number(row.get("pnl_pct")) for row in active_rows], default=0), 2),
+            "seal_count": seal_count,
+            "seal_rate": round((seal_count / len(active_rows)) * 100, 2) if active_rows else 0,
+            "hold_count": hold_count,
+            "rebalance_count": rebalance_count,
+            "clear_count": clear_count,
+            "buy_count": len([trade for trade in trades if trade.get("side") == "buy"]),
+            "sell_count": len([trade for trade in trades if trade.get("side") == "sell"]),
+            "rows": sorted(review_rows, key=lambda item: (str(item.get("trade_action") or ""), _number(item.get("rank")) or 99)),
+            "ending_positions": ending_positions,
+            "trades": trades,
+        }
+        record["decision"] = _system_daily_decision(record)
+        records.append(record)
+        previous_equity = equity
     return records
 
 
-def _build_system_review_record(payload: dict[str, Any]) -> dict[str, Any] | None:
+def _build_system_buy_row(row: dict[str, Any], allocation: float, trade_date: str) -> dict[str, Any]:
+    raw_entry = _number(row.get("official_entry_price") or row.get("entry_price") or row.get("official_trigger_price") or row.get("trigger_price") or row.get("open") or row.get("price"))
+    entry_price = raw_entry * (1 + LIMIT_UP_SYSTEM_SLIPPAGE_RATE) if raw_entry > 0 else 0
+    price = _number(row.get("price")) or raw_entry or entry_price
+    shares = int(allocation / max(entry_price, 0.01) / 100) * 100 if entry_price > 0 else 0
+    invested_amount = shares * entry_price
+    fee = _trade_fee(invested_amount)
+    pnl_amount = shares * (price - entry_price) - fee
+    pnl_pct = (price / entry_price - 1) * 100 if entry_price > 0 else 0
+    status, action = _system_position_status(row, pnl_pct)
+    if shares <= 0:
+        status, action = "已剔除", "资金不足"
+    return {
+        "code": row.get("code") or "",
+        "name": row.get("name") or row.get("code") or "",
+        "sector": row.get("sector") or "--",
+        "rank": int(_number(row.get("official_rank")) or 0),
+        "trade_date": trade_date,
+        "trade_action": "buy",
+        "entry_price": round(entry_price, 3),
+        "price": round(price, 3),
+        "allocated_capital": round(allocation, 2),
+        "shares": shares,
+        "invested_amount": round(invested_amount, 2),
+        "fee": round(fee, 2),
+        "market_value": round(shares * price, 2),
+        "pnl_amount": round(pnl_amount, 2),
+        "pnl_pct": round(pnl_pct, 2),
+        "change_pct": round(_number(row.get("change_pct")), 2),
+        "from_open_pct": round(_number(row.get("close_from_open_pct")) or ((price / _number(row.get("open")) - 1) * 100 if _number(row.get("open")) else 0), 2),
+        "sealed_today": bool(row.get("sealed_today")),
+        "state": row.get("state") or "",
+        "action": action,
+        "position_status": status,
+        "failure_reason": _system_failure_reason(row, pnl_pct),
+    }
+
+
+def _review_existing_system_position(position: dict[str, Any], row: dict[str, Any], trade_date: str) -> dict[str, Any]:
+    entry_price = _number(position.get("entry_price"))
+    shares = int(_number(position.get("shares")))
+    price = _number(row.get("price")) or _number(position.get("price")) or entry_price
+    invested_amount = _number(position.get("invested_amount")) or shares * entry_price
+    pnl_amount = shares * (price - entry_price)
+    pnl_pct = (price / entry_price - 1) * 100 if entry_price > 0 else 0
+    if row:
+        status, action = _system_position_status(row, pnl_pct)
+        failure_reason = _system_failure_reason(row, pnl_pct)
+    else:
+        status, action = "持有中", "缺少行情观察"
+        failure_reason = "缺少行情"
+    exit_position = status in {"已剔除", "待调仓"} and bool(row)
+    exit_amount = shares * price if exit_position else 0
+    fee = _trade_fee(exit_amount) if exit_position else 0
+    return {
+        "code": position.get("code") or row.get("code") or "",
+        "name": position.get("name") or row.get("name") or "",
+        "sector": position.get("sector") or row.get("sector") or "--",
+        "rank": int(_number(position.get("rank")) or _number(row.get("official_rank")) or 0),
+        "trade_date": trade_date,
+        "opened_at": position.get("opened_at") or position.get("trade_date") or trade_date,
+        "trade_action": "sell" if exit_position else "hold",
+        "entry_price": round(entry_price, 3),
+        "price": round(price, 3),
+        "allocated_capital": round(_number(position.get("allocated_capital")) or invested_amount, 2),
+        "shares": shares,
+        "invested_amount": round(invested_amount, 2),
+        "fee": round(fee, 2),
+        "exit": exit_position,
+        "exit_amount": round(exit_amount, 2),
+        "market_value": round(0 if exit_position else shares * price, 2),
+        "pnl_amount": round(pnl_amount - fee, 2),
+        "pnl_pct": round(pnl_pct, 2),
+        "change_pct": round(_number(row.get("change_pct")), 2),
+        "from_open_pct": round(_number(row.get("close_from_open_pct")) or ((price / _number(row.get("open")) - 1) * 100 if _number(row.get("open")) else 0), 2),
+        "sealed_today": bool(row.get("sealed_today")),
+        "state": row.get("state") or ("无当日行情" if not row else ""),
+        "action": action,
+        "position_status": status,
+        "failure_reason": failure_reason,
+    }
+
+
+def _position_from_review_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": row.get("code") or "",
+        "name": row.get("name") or "",
+        "sector": row.get("sector") or "--",
+        "rank": int(_number(row.get("rank")) or 0),
+        "entry_price": _number(row.get("entry_price")),
+        "price": _number(row.get("price")),
+        "shares": int(_number(row.get("shares"))),
+        "invested_amount": _number(row.get("invested_amount")),
+        "allocated_capital": _number(row.get("allocated_capital")),
+        "opened_at": row.get("opened_at") or row.get("trade_date"),
+    }
+
+
+def _mark_to_market_position(position: dict[str, Any], rows_by_code: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    row = rows_by_code.get(str(position.get("code") or "")) or {}
+    price = _number(row.get("price")) or _number(position.get("price")) or _number(position.get("entry_price"))
+    entry_price = _number(position.get("entry_price"))
+    shares = int(_number(position.get("shares")))
+    market_value = shares * price
+    pnl_amount = shares * (price - entry_price)
+    pnl_pct = (price / entry_price - 1) * 100 if entry_price > 0 else 0
+    marked = dict(position)
+    marked.update({
+        "price": round(price, 3),
+        "market_value": round(market_value, 2),
+        "pnl_amount": round(pnl_amount, 2),
+        "pnl_pct": round(pnl_pct, 2),
+        "state": row.get("state") or marked.get("state") or "",
+        "sealed_today": bool(row.get("sealed_today")),
+    })
+    return marked
+
+
+def _system_trade(side: str, row: dict[str, Any], day: dict[str, Any], reason: str) -> dict[str, Any]:
+    amount = _number(row.get("invested_amount")) if side == "buy" else _number(row.get("exit_amount"))
+    return {
+        "date": day.get("date") or "",
+        "side": side,
+        "code": row.get("code") or "",
+        "name": row.get("name") or "",
+        "price": row.get("entry_price") if side == "buy" else row.get("price"),
+        "shares": int(_number(row.get("shares"))),
+        "amount": round(amount, 2),
+        "fee": round(_number(row.get("fee")), 2),
+        "reason": reason,
+    }
+
+
+def _trade_fee(amount: float) -> float:
+    if amount <= 0:
+        return 0
+    return max(1.0, amount * LIMIT_UP_SYSTEM_FEE_RATE)
+
+
+def _system_daily_decision(record: dict[str, Any]) -> dict[str, Any]:
+    pnl_pct = _number(record.get("pnl_pct"))
+    drawdown = _number(record.get("drawdown_pct"))
+    clear_count = int(_number(record.get("clear_count")))
+    hold_count = int(_number(record.get("hold_count")))
+    if pnl_pct <= -2 or clear_count >= 2:
+        action, level = "明日收缩", "danger"
+        reason = "亏损或剔除偏多，只保留封板确认。"
+    elif pnl_pct >= 2 and hold_count:
+        action, level = "明日进攻", "good"
+        reason = "账户和持仓状态较强，继续围绕昨日涨停池。"
+    elif drawdown <= -5:
+        action, level = "暂停扩仓", "danger"
+        reason = "账户回撤扩大，先降频观察。"
+    else:
+        action, level = "正常盯盘", "warn"
+        reason = "只做强承接和回封确认，不追弱转强失败票。"
+    return {"action": action, "level": level, "reason": reason}
+
+
+def _system_review_rules(selected: dict[str, Any] | None, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not selected:
+        return [
+            {"title": "账户", "badge": "等待", "level": "warn", "detail": "暂无系统打板账本。"},
+            {"title": "仓位", "badge": "0/3", "level": "warn", "detail": "等待正式买点。"},
+            {"title": "纪律", "badge": "空仓", "level": "good", "detail": "没有买点时不强行交易。"},
+        ]
+    loss_streak = _system_review_stats(records).get("loss_streak", 0)
+    return [
+        {
+            "title": "账户",
+            "badge": format_system_badge(_number(selected.get("pnl_pct")), "%"),
+            "level": selected.get("decision", {}).get("level", "warn"),
+            "detail": selected.get("decision", {}).get("reason", ""),
+        },
+        {
+            "title": "仓位",
+            "badge": f"{selected.get('position_count', 0)}/{LIMIT_UP_SYSTEM_MAX_POSITIONS}",
+            "level": "good" if int(_number(selected.get("position_count"))) else "warn",
+            "detail": f"买入{selected.get('buy_count', 0)}，卖出{selected.get('sell_count', 0)}，现金{round(_number(selected.get('cash')), 2)}。",
+        },
+        {
+            "title": "连续亏损",
+            "badge": str(loss_streak),
+            "level": "danger" if loss_streak >= 2 else "good",
+            "detail": "连续亏损达到2天则次日只做核心封板确认。",
+        },
+    ]
+
+
+def format_system_badge(value: float, suffix: str = "") -> str:
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f}{suffix}"
+
+
+def _legacy_system_review_record(payload: dict[str, Any]) -> dict[str, Any] | None:
     rows = payload.get("rows") or payload.get("top_rows") or []
     if not isinstance(rows, list):
         return None

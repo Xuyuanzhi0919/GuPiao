@@ -608,11 +608,18 @@ export interface LimitUpSystemReviewRow {
   name: string;
   sector: string;
   rank: number;
+  trade_date?: string;
+  opened_at?: string;
+  trade_action?: "buy" | "hold" | "sell" | string;
   entry_price: number;
   price: number;
   allocated_capital: number;
   shares: number;
   invested_amount: number;
+  fee?: number;
+  market_value?: number;
+  exit?: boolean;
+  exit_amount?: number;
   pnl_amount: number;
   pnl_pct: number;
   change_pct: number;
@@ -629,11 +636,15 @@ export interface LimitUpSystemReviewRecord {
   source_date?: string;
   ts?: number;
   capital: number;
+  start_equity?: number;
   position_count: number;
   invested_amount: number;
   cash: number;
+  market_value?: number;
+  equity?: number;
   pnl_amount: number;
   pnl_pct: number;
+  total_return_pct?: number;
   best_pnl_pct: number;
   worst_pnl_pct: number;
   seal_count: number;
@@ -641,9 +652,29 @@ export interface LimitUpSystemReviewRecord {
   hold_count: number;
   rebalance_count: number;
   clear_count: number;
-  equity?: number;
+  buy_count?: number;
+  sell_count?: number;
   drawdown_pct?: number;
+  decision?: {
+    action: string;
+    level: string;
+    reason: string;
+  };
+  ending_positions?: LimitUpSystemReviewRow[];
+  trades?: LimitUpSystemTrade[];
   rows: LimitUpSystemReviewRow[];
+}
+
+export interface LimitUpSystemTrade {
+  date: string;
+  side: "buy" | "sell" | string;
+  code: string;
+  name: string;
+  price: number;
+  shares: number;
+  amount: number;
+  fee: number;
+  reason: string;
 }
 
 export interface LimitUpSystemReviewPayload {
@@ -652,6 +683,14 @@ export interface LimitUpSystemReviewPayload {
   max_positions: number;
   selected?: LimitUpSystemReviewRecord | null;
   history: LimitUpSystemReviewRecord[];
+  positions?: LimitUpSystemReviewRow[];
+  trades?: LimitUpSystemTrade[];
+  rules?: Array<{
+    title: string;
+    badge: string;
+    level: string;
+    detail: string;
+  }>;
   dates: string[];
   stats: {
     trade_days: number;
