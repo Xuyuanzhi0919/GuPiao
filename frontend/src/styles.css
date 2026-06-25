@@ -4621,6 +4621,24 @@ small.ai-evidence {
   font-size: 24px;
 }
 
+.limit-data-quality {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.limit-data-quality span {
+  border: 1px solid var(--soft-line);
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 6px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .limit-collapse-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;

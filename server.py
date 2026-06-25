@@ -237,15 +237,21 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
     async with STATE.limit_up_notification_lock:
         sent = _load_json_dict(LIMIT_UP_BUY_SIGNAL_STATE)
         changed = False
-        def notification_keys(item: dict[str, Any]) -> tuple[str, str]:
-            primary = f"{payload.get('date')}:{item.get('code')}"
+        def notification_keys(item: dict[str, Any]) -> tuple[str, str, str]:
+            stage = _next_day_notification_stage(item)
+            primary = f"{payload.get('date')}:{item.get('code')}:{stage}"
+            old_primary = f"{payload.get('date')}:{item.get('code')}"
             legacy = f"{payload.get('date')}:{item.get('code')}:{item.get('state')}"
-            return primary, legacy
+            return primary, old_primary, legacy
 
         pending_notifications = [
             (notification_keys(item)[0], item)
             for item in payload.get("buy_signals", [])[:10]
-            if notification_keys(item)[0] not in sent and notification_keys(item)[1] not in sent
+            if notification_keys(item)[0] not in sent
+            and (
+                _next_day_notification_stage(item) != "entry"
+                or (notification_keys(item)[1] not in sent and notification_keys(item)[2] not in sent)
+            )
         ]
         if pending_notifications:
             notifications = await asyncio.gather(
@@ -268,6 +274,15 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
     payload["tick_driven"] = tick_driven
     await STATE.publish_limit_up(payload)
     return payload
+
+
+def _next_day_notification_stage(item: dict[str, Any]) -> str:
+    state = str(item.get("state") or "")
+    if state in {"首封确认", "回封确认"} or item.get("sealed_today"):
+        return "seal"
+    if item.get("kline_signal") == "weak" or state in {"风险观察", "放弃"}:
+        return "risk"
+    return "entry"
 
 
 async def maybe_monitor_position_risk_signals(tick_driven: bool = False) -> list[dict[str, Any]]:

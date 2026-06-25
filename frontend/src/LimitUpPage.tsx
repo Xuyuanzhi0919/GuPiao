@@ -196,6 +196,7 @@ export function LimitUpPage() {
   const buyBrief = useMemo(() => monitorPayload?.buy_signals || [], [monitorPayload]);
   const coreBrief = useMemo(() => (focusPayload?.focus || []).filter((item) => item.openclaw_tier === "core"), [focusPayload]);
   const activeBrief = useMemo(() => (monitorPayload?.rows || []).filter((item) => item.action === "WATCH"), [monitorPayload]);
+  const quality = monitorPayload?.data_quality;
 
   const sortOptions = getSortOptions(tab);
   const rows = useMemo(() => {
@@ -273,6 +274,14 @@ export function LimitUpPage() {
             <LimitMetric icon={<TrendingUp size={16} />} label={`今日涨停池${monitorPayload?.date ? ` ${monitorPayload.date}` : ""}`} value={monitorPayload?.summary.today_limit_count ?? monitorPayload?.today_pool?.length ?? "--"} />
             <LimitMetric icon={<CalendarClock size={16} />} label="当前阶段" value={monitorPayload?.phase?.label ?? "--"} />
             <LimitMetric icon={<TrendingUp size={16} />} label="正式买点" value={`${monitorPayload?.summary.buy_signal_count ?? "--"}/3`} />
+            <LimitMetric icon={<RefreshCw size={16} />} label="分时就绪" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
+            <LimitMetric icon={<CalendarClock size={16} />} label="数据更新" value={quality?.updated_at ? ageText(quality.updated_at) : "--"} />
+          </div>
+          <div className="limit-data-quality">
+            <span>{streamState === "live" ? "WebSocket 实时" : "轮询兜底"}</span>
+            <span>行情 {quality?.quote_count ?? 0}/{quality?.watch_count ?? 0}</span>
+            <span>涨停池 {quality?.today_pool_ignored ? "已忽略疑似旧数据" : `${quality?.today_pool_count ?? 0}只`}</span>
+            <span>分时源 {sourceBreakdown(quality?.kline_source_counts)}</span>
           </div>
         </section>
       ) : null}
@@ -603,11 +612,12 @@ function BuyCard({ bought, item, onBuy }: { bought: boolean; item: LimitUpNextDa
   const klineText = klineSignalLabel(item.kline_signal);
   const sourceText = klineSourceLabel(item.kline_source);
   const canBuy = item.action !== "PASS";
+  const status = buyRecordStatus(item, bought);
   return (
     <article className={`limit-card ${item.action.toLowerCase()}`}>
       <header>
         <b>{item.official_rank ? `正式#${item.official_rank}` : item.state}</b>
-        <span>{item.buy_unavailable ? "买不到" : `${item.score.toFixed(0)}分`}</span>
+        <span>{status.badge}</span>
       </header>
       <h2>{item.name} <small>{item.code}</small></h2>
       <p>{item.sector} · 昨日{item.source_streak}板 · 高开{formatPct(item.open_pct)} · 涨幅{formatPct(item.change_pct)} · 成交{formatMoney(item.amount)}</p>
@@ -624,10 +634,28 @@ function BuyCard({ bought, item, onBuy }: { bought: boolean; item: LimitUpNextDa
       <div className="limit-tags">{item.reasons.map((reason) => <i key={reason}>{reason}</i>)}</div>
       <footer>
         <ShieldAlert size={14} />{item.risk_note}
-        {canBuy ? <button className="limit-buy-button" disabled={bought} onClick={() => onBuy(item)} type="button">{bought ? "已买入" : "记录买入"}</button> : null}
+        {canBuy ? <button className="limit-buy-button" disabled={status.disabled} onClick={() => onBuy(item)} type="button">{status.button}</button> : null}
       </footer>
     </article>
   );
+}
+
+function buyRecordStatus(item: LimitUpNextDayRow, bought: boolean) {
+  if (bought) return { badge: "已记录", button: "已记录买入", disabled: true };
+  if (item.official_buy) return { badge: `系统#${item.official_rank || ""}`, button: "记录实盘买入", disabled: false };
+  if (item.buy_unavailable) return { badge: "买不到", button: "人工确认成交", disabled: false };
+  return { badge: `${item.score.toFixed(0)}分`, button: "记录买入", disabled: false };
+}
+
+function ageText(ts: number) {
+  const age = Math.max(0, Math.round(Date.now() / 1000 - Number(ts || 0)));
+  if (age < 60) return `${age}s前`;
+  return `${Math.floor(age / 60)}m前`;
+}
+
+function sourceBreakdown(counts?: Record<string, number>) {
+  if (!counts || !Object.keys(counts).length) return "未拉取";
+  return Object.entries(counts).map(([key, value]) => `${klineSourceLabel(key)}${value}`).join("/");
 }
 
 function klineSignalLabel(value?: string) {

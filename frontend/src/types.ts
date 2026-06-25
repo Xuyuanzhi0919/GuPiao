@@ -590,6 +590,17 @@ export interface LimitUpNextDayPayload {
   rows: LimitUpNextDayRow[];
   buy_signals: LimitUpNextDayRow[];
   today_sectors: LimitUpSector[];
+  data_quality?: {
+    quote_count: number;
+    watch_count: number;
+    kline_requested_count: number;
+    kline_ready_count: number;
+    kline_source_counts: Record<string, number>;
+    today_pool_count: number;
+    today_pool_ignored: boolean;
+    updated_at: number;
+    source: string;
+  };
   summary: {
     watch_count: number;
     today_limit_count?: number;

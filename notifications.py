@@ -180,6 +180,7 @@ class NotificationCenter:
         source = _kline_source_label(str(item.get("kline_source") or ""))
         minute = str(item.get("kline_last_time") or "")
         minute_part = f" · 分时{source}{' ' + minute[-5:] if minute else ''}" if source else ""
+        stage = "封板升级" if item.get("sealed_today") or state in {"首封确认", "回封确认"} else "首次买点"
         if tier == "avoid":
             if not self._rule_enabled("next_day_risk_enabled"):
                 return Notification(time.time(), "next-day-risk", code, name, "剔除票异动", "风险观察提醒已关闭", "disabled", False, "风险观察提醒已关闭")
@@ -196,7 +197,7 @@ class NotificationCenter:
         if rank:
             trigger = str(item.get("official_trigger_time") or item.get("today_first_limit_time") or minute[-5:] or "")
             entry = item.get("official_entry_price") or item.get("price") or "--"
-            title = f"买点#{rank} {name} {state}"
+            title = f"{stage}#{rank} {name} {state}"
             body = f"{code} · {trigger} · 入场{entry} · 现价{price} · 分{score}{minute_part} · {reasons}".strip()
         else:
             body = f"{code} · {state} · 现价{price} · 分{score}{minute_part} · {reasons} · {item.get('risk_note', '')}".strip()

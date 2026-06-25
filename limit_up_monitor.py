@@ -194,9 +194,28 @@ class LimitUpMonitor:
         kline_codes = _select_kline_codes(watch_pool, quotes_payload.get("quotes") or {}, focus_by_code)
         kline_by_code, kline_errors = _fetch_intraday_kline_signals(kline_codes, current_date)
         rows = _build_next_day_rows(watch_pool, quotes_payload.get("quotes") or {}, today_by_code, sector_strength, focus_by_code, kline_by_code)
-        opportunity_signals = [item for item in rows if item.get("action") == "BUY" and item.get("openclaw_tier") != "avoid"]
+        opportunity_signals = sorted(
+            [item for item in rows if item.get("action") == "BUY" and item.get("openclaw_tier") != "avoid"],
+            key=_official_candidate_sort_key,
+            reverse=True,
+        )
         allow_official_lock = _allow_official_buy_lock(session, current_date)
         buy_signals = self._lock_official_buy_signals(current_date, opportunity_signals, rows, allow_official_lock)
+        kline_source_counts: dict[str, int] = {}
+        for signal in kline_by_code.values():
+            source = str(signal.get("source") or "unknown")
+            kline_source_counts[source] = kline_source_counts.get(source, 0) + 1
+        data_quality = {
+            "quote_count": len(quotes_payload.get("quotes") or {}),
+            "watch_count": len(watch_pool),
+            "kline_requested_count": len(kline_codes),
+            "kline_ready_count": len([item for item in kline_by_code.values() if item.get("available")]),
+            "kline_source_counts": kline_source_counts,
+            "today_pool_count": len(today_pool),
+            "today_pool_ignored": bool(stale_error),
+            "updated_at": time.time(),
+            "source": "eastmoney+quotes+kline",
+        }
         payload = {
             "date": current_date,
             "source_date": focus_payload.get("date"),
@@ -211,6 +230,7 @@ class LimitUpMonitor:
             "buy_signals": buy_signals,
             "opportunity_signals": opportunity_signals,
             "today_sectors": today_sectors,
+            "data_quality": data_quality,
             "summary": {
                 "watch_count": len(watch_pool),
                 "today_limit_count": len(today_pool),
@@ -250,10 +270,10 @@ class LimitUpMonitor:
             except (OSError, json.JSONDecodeError):
                 locked_codes = []
                 locked_items = {}
-        current_opportunity_codes = {str(item.get("code") or "") for item in opportunities if item.get("code") and not item.get("buy_unavailable")}
         if allow_new_locks:
-            locked_codes = [code for code in locked_codes if code in current_opportunity_codes]
-            locked_items = {code: item for code, item in locked_items.items() if code in current_opportunity_codes}
+            row_by_code = {str(item.get("code") or ""): item for item in rows if item.get("code")}
+            locked_codes = [code for code in locked_codes if not _should_release_official_lock(row_by_code.get(code))]
+            locked_items = {code: item for code, item in locked_items.items() if code in locked_codes}
         sector_counts: dict[str, int] = {}
         for code in locked_codes:
             item = locked_items.get(code) or {}
@@ -285,7 +305,7 @@ class LimitUpMonitor:
                 row["official_trigger_price"] = old.get("trigger_price") or row.get("price")
                 row["official_entry_price"] = old.get("entry_price") or _entry_price(row)
                 row["official_reason"] = old.get("reason") or _official_reason(row)
-            if rank and code in by_code:
+            if rank:
                 official.append(row)
         snapshot = {
             "date": trade_date,
@@ -373,7 +393,7 @@ class LimitUpMonitor:
             "ts": time.time(),
             "summary": payload.get("summary") or {},
             "tiers": stats,
-            "top_rows": rows[:30],
+            "top_rows": _review_archive_rows(rows),
         }
         (self.data_dir / f"limit_up_next_day_review_{payload.get('source_date')}_{payload.get('date')}.json").write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
         (self.data_dir / "limit_up_next_day_review_latest.json").write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -416,6 +436,30 @@ def _normalize_limit_row(row: dict[str, Any]) -> dict[str, Any]:
 
 def _filter_tradeable_pool(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in pool if _is_tradeable_main_board(str(item.get("code") or ""))]
+
+
+def _review_archive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    priority = sorted(
+        rows,
+        key=lambda item: (
+            bool(item.get("official_buy")),
+            item.get("action") == "BUY",
+            item.get("action") == "WATCH",
+            _number(item.get("score")),
+        ),
+        reverse=True,
+    )
+    for item in priority:
+        code = str(item.get("code") or "")
+        if not code or code in seen:
+            continue
+        selected.append(item)
+        seen.add(code)
+        if len(selected) >= 120:
+            break
+    return selected
 
 
 def _is_tradeable_main_board(code: str) -> bool:
@@ -815,7 +859,8 @@ def _fetch_intraday_kline_signals(codes: list[str], trade_date: str) -> tuple[di
         signal["source"] = source
         return code, signal
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    workers = max(1, min(len(codes), int(os.environ.get("LIMIT_UP_KLINE_WORKERS", "5") or 5)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(fetch_one, code): code for code in codes}
         for future in as_completed(futures):
             code = futures[future]
@@ -891,7 +936,7 @@ def _fetch_fast_minute_bars(symbol: str, trade_date: str) -> list[MinuteBar]:
 
 def _fetch_fast_minute_bars_with_meta(symbol: str, trade_date: str) -> tuple[list[MinuteBar], str]:
     cached = _read_minute_bars_cache(symbol, trade_date)
-    if cached is not None:
+    if cached is not None and _minute_bars_cache_is_fresh(symbol, trade_date):
         return cached, _read_minute_bars_cache_source(symbol, trade_date) or "cache"
     try:
         bars = _fetch_sina_minute_bars(symbol, trade_date)
@@ -1084,6 +1129,19 @@ def _read_minute_bars_cache_source(symbol: str, trade_date: str) -> str:
         return str(payload.get("source") or "cache") if isinstance(payload, dict) else "cache"
     except (OSError, json.JSONDecodeError):
         return "cache"
+
+
+def _minute_bars_cache_is_fresh(symbol: str, trade_date: str) -> bool:
+    if trade_date != date.today().isoformat():
+        return True
+    path = _minute_bars_cache_meta_path(symbol, trade_date)
+    max_age = float(os.environ.get("LIMIT_UP_KLINE_CACHE_MAX_AGE_SEC", "6") or 6)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        updated_at = _number(payload.get("updated_at")) if isinstance(payload, dict) else 0
+    except (OSError, json.JSONDecodeError):
+        updated_at = 0
+    return bool(updated_at and time.time() - updated_at <= max_age)
 
 
 def _write_minute_bars_cache(symbol: str, trade_date: str, bars: list[MinuteBar], source: str = "cache") -> None:
@@ -1416,6 +1474,37 @@ def _is_buy_unavailable(first_time: Any, open_board_count: int, open_price: floa
     early_sealed = bool(first_sort <= 930 and open_board_count <= 0)
     huge_seal = bool(seal_amount >= 300_000_000 and open_board_count <= 0 and first_sort <= 935)
     return early_sealed or one_line or huge_seal
+
+
+def _official_candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, float, float, float]:
+    tier = str(item.get("openclaw_tier") or "")
+    tier_score = {"core": 4, "watch": 3, "rule": 2, "": 2}.get(tier, 1)
+    stage_score = 3 if item.get("sealed_today") else 2 if item.get("kline_signal") == "strong" else 1
+    state = str(item.get("state") or "")
+    state_score = 3 if state in {"首封确认", "回封确认"} else 2 if state in {"分时确认", "开盘确认"} else 1
+    return (
+        tier_score,
+        stage_score,
+        state_score,
+        _number(item.get("score")),
+        _number(item.get("amount")),
+        -_time_sort(item.get("today_first_limit_time") or "99:99"),
+    )
+
+
+def _should_release_official_lock(row: dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+    state = str(row.get("state") or "")
+    if row.get("buy_unavailable") or state in {"买不到", "放弃", "风险观察"}:
+        return True
+    if row.get("kline_signal") == "weak" and not row.get("sealed_today"):
+        return True
+    if _number(row.get("close_from_open_pct")) <= -2.5 and not row.get("sealed_today"):
+        return True
+    if _number(row.get("score")) < 34 and not row.get("sealed_today"):
+        return True
+    return False
 
 
 def _entry_price(item: dict[str, Any]) -> float:
