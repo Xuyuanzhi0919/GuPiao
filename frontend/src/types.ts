@@ -607,6 +607,34 @@ export interface LimitUpNextDayPayload {
     updated_at: number;
     source: string;
   };
+  runtime?: {
+    status?: string;
+    source?: string;
+    data_age_sec?: number | null;
+    error_count?: number;
+    retry_count?: number;
+    limit_up_stream?: {
+      status: string;
+      last_publish_ts: number;
+      last_tick_ts: number;
+      publish_age_sec?: number | null;
+      tick_age_sec?: number | null;
+      publish_count: number;
+      client_count: number;
+      drop_count: number;
+      interval_sec: number;
+    };
+  };
+  notification_reliability?: {
+    sample_count: number;
+    success_count: number;
+    failure_count: number;
+    success_rate: number;
+    avg_elapsed_ms: number;
+    pending_retry_count: number;
+    last_error?: string;
+    recent?: Array<Record<string, unknown>>;
+  };
   permission?: {
     status: "normal" | "reduced" | "blocked" | string;
     label: string;
@@ -639,6 +667,10 @@ export interface LimitUpSystemReviewRow {
   trade_date?: string;
   opened_at?: string;
   trade_action?: "buy" | "hold" | "sell" | string;
+  planned_action?: string;
+  actual_action?: string;
+  execution_status?: string;
+  t1_status?: string;
   entry_price: number;
   price: number;
   allocated_capital: number;
@@ -703,6 +735,7 @@ export interface LimitUpSystemTrade {
   amount: number;
   fee: number;
   reason: string;
+  execution_status?: string;
 }
 
 export interface LimitUpSystemReviewPayload {

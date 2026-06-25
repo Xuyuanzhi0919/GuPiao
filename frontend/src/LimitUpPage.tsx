@@ -226,6 +226,8 @@ export function LimitUpPage() {
   const activeBrief = useMemo(() => (monitorPayload?.rows || []).filter((item) => item.action === "WATCH"), [monitorPayload]);
   const quality = monitorPayload?.data_quality;
   const permission = monitorPayload?.permission;
+  const streamHealth = monitorPayload?.runtime?.limit_up_stream;
+  const reliability = monitorPayload?.notification_reliability;
 
   const sortOptions = getSortOptions(tab);
   const rows = useMemo(() => {
@@ -306,10 +308,14 @@ export function LimitUpPage() {
             <LimitMetric icon={<TrendingUp size={16} />} label="正式买点" value={`${monitorPayload?.summary.buy_signal_count ?? "--"}/3`} />
             <LimitMetric icon={<ShieldAlert size={16} />} label="出手权限" value={permission?.label ?? "--"} />
             <LimitMetric icon={<RefreshCw size={16} />} label="分时就绪" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
+            <LimitMetric icon={<Bell size={16} />} label="推送成功率" value={reliability ? `${reliability.success_rate}%` : "--"} />
+            <LimitMetric icon={<ActivityIcon />} label="流延迟" value={streamHealth?.publish_age_sec != null ? `${streamHealth.publish_age_sec}s` : "--"} />
             <LimitMetric icon={<CalendarClock size={16} />} label="数据更新" value={quality?.updated_at ? ageText(quality.updated_at) : "--"} />
           </div>
           <div className="limit-data-quality">
             <span>{streamState === "live" ? "WebSocket 实时" : "轮询兜底"}</span>
+            <span>流状态 {streamHealth?.status || "--"} · 客户端{streamHealth?.client_count ?? 0}</span>
+            <span>补发队列 {reliability?.pending_retry_count ?? 0} · 延迟{reliability?.avg_elapsed_ms ?? 0}ms</span>
             <span>行情 {quality?.quote_count ?? 0}/{quality?.watch_count ?? 0}</span>
             <span>涨停池 {quality?.today_pool_ignored ? "已忽略疑似旧数据" : `${quality?.today_pool_count ?? 0}只`}</span>
             <span>分时源 {sourceBreakdown(quality?.kline_source_counts)}</span>
@@ -467,6 +473,10 @@ function LimitMetric({ icon, label, value }: { icon: ReactNode; label: string; v
       <strong>{value}</strong>
     </article>
   );
+}
+
+function ActivityIcon() {
+  return <TrendingUp size={16} />;
 }
 
 function CollapseHeader({ count, onToggle, open, title }: { count: string; onToggle: () => void; open: boolean; title: string }) {

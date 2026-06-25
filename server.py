@@ -47,6 +47,7 @@ ALERT_KEEP_SEC = int(os.environ.get("ALERT_KEEP_SEC", "600"))
 LIMIT_UP_FOCUS_STATE = DATA / "limit_up_focus_state.json"
 LIMIT_UP_BUY_SIGNAL_STATE = DATA / "limit_up_buy_signal_state.json"
 LIMIT_UP_POSITION_SIGNAL_STATE = DATA / "limit_up_position_signal_state.json"
+LIMIT_UP_NOTIFICATION_LEDGER = DATA / "limit_up_notification_ledger.json"
 LIMIT_UP_SYSTEM_REVIEW_HISTORY = DATA / "limit_up_system_review_history.json"
 LIMIT_UP_SYSTEM_CAPITAL = 100000
 LIMIT_UP_SYSTEM_MAX_POSITIONS = 3
@@ -77,6 +78,9 @@ class AppState:
         self.limit_up_monitor_lock = asyncio.Lock()
         self.limit_up_notification_lock = asyncio.Lock()
         self.last_limit_up_tick_ts = 0.0
+        self.last_limit_up_publish_ts = 0.0
+        self.limit_up_publish_count = 0
+        self.limit_up_ws_drop_count = 0
         self.started_at = time.time()
         self.last_batch_ts = 0.0
         self.batch_count = 0
@@ -101,6 +105,8 @@ class AppState:
 
     async def publish_limit_up(self, payload: dict[str, Any]) -> None:
         stale: list[asyncio.Queue] = []
+        self.last_limit_up_publish_ts = time.time()
+        self.limit_up_publish_count += 1
         for queue in self.limit_up_clients:
             try:
                 queue.put_nowait(payload)
@@ -108,6 +114,7 @@ class AppState:
                 stale.append(queue)
         for queue in stale:
             self.limit_up_clients.discard(queue)
+            self.limit_up_ws_drop_count += 1
 
     def mark_batch(self, tick_count: int) -> None:
         self.last_batch_ts = time.time()
@@ -144,6 +151,24 @@ class AppState:
             "bad_row_count": getattr(self.data_source, "bad_row_count", 0),
             "last_bad_row_error": getattr(self.data_source, "last_bad_row_error", ""),
             "upstream_health": getattr(self.data_source, "upstream_health", {}),
+            "limit_up_stream": self.limit_up_stream_status(),
+        }
+
+    def limit_up_stream_status(self) -> dict[str, Any]:
+        now = time.time()
+        publish_age = now - self.last_limit_up_publish_ts if self.last_limit_up_publish_ts else None
+        tick_age = now - self.last_limit_up_tick_ts if self.last_limit_up_tick_ts else None
+        live = bool(publish_age is not None and publish_age <= max(8, LIMIT_UP_MONITOR_INTERVAL_SEC * 2))
+        return {
+            "status": "OK" if live else "STALE",
+            "last_publish_ts": self.last_limit_up_publish_ts,
+            "last_tick_ts": self.last_limit_up_tick_ts,
+            "publish_age_sec": round(publish_age, 2) if publish_age is not None else None,
+            "tick_age_sec": round(tick_age, 2) if tick_age is not None else None,
+            "publish_count": self.limit_up_publish_count,
+            "client_count": len(self.limit_up_clients),
+            "drop_count": self.limit_up_ws_drop_count,
+            "interval_sec": LIMIT_UP_TICK_INTERVAL_SEC,
         }
 
 
@@ -236,7 +261,6 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
         await asyncio.to_thread(STATE.db_store.save_next_day_monitor, payload)
     async with STATE.limit_up_notification_lock:
         sent = _load_json_dict(LIMIT_UP_BUY_SIGNAL_STATE)
-        changed = False
         def notification_keys(item: dict[str, Any]) -> tuple[str, str, str]:
             stage = _next_day_notification_stage(item)
             primary = f"{payload.get('date')}:{item.get('code')}:{stage}"
@@ -247,26 +271,19 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
         pending_notifications = [
             (notification_keys(item)[0], item)
             for item in payload.get("buy_signals", [])[:10]
-            if notification_keys(item)[0] not in sent
+            if _notification_due(sent.get(notification_keys(item)[0]))
             and (
                 _next_day_notification_stage(item) != "entry"
                 or (notification_keys(item)[1] not in sent and notification_keys(item)[2] not in sent)
             )
         ]
-        if pending_notifications:
-            notifications = await asyncio.gather(
-                *(asyncio.to_thread(STATE.notifications.notify_next_day_buy_signal, item) for _, item in pending_notifications),
-                return_exceptions=True,
-            )
-        else:
-            notifications = []
-        for (key, _item), notification in zip(pending_notifications, notifications, strict=False):
-            if isinstance(notification, Exception):
-                sent[key] = {"ts": time.time(), "sent": False, "channel": "error", "error": f"{notification.__class__.__name__}: {notification}"}
-                changed = True
-                continue
-            sent[key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
-            changed = True
+        await _deliver_notifications(
+            sent,
+            "next-day-buy",
+            pending_notifications,
+            lambda item: STATE.notifications.notify_next_day_buy_signal(item),
+            lambda item: {"state": item.get("state"), "rank": item.get("official_rank"), "stage": _next_day_notification_stage(item)},
+        )
         cancel_candidates = [
             item for item in payload.get("rows", [])
             if item.get("official_buy") and _official_buy_should_cancel(item)
@@ -275,25 +292,21 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
         for item in cancel_candidates:
             t1_locked = str(item.get("execution_status") or "") == "filled"
             key = f"{payload.get('date')}:{item.get('code')}:{'t1-risk' if t1_locked else 'cancel'}"
-            if key not in sent:
+            if _notification_due(sent.get(key)):
                 cancel_pending.append((key, item, t1_locked))
-        if cancel_pending:
-            cancel_results = await asyncio.gather(
-                *(asyncio.to_thread(STATE.notifications.notify_next_day_cancel_signal, item, t1_locked) for _, item, t1_locked in cancel_pending),
-                return_exceptions=True,
-            )
-            for (key, _item, _t1_locked), notification in zip(cancel_pending, cancel_results, strict=False):
-                if isinstance(notification, Exception):
-                    sent[key] = {"ts": time.time(), "sent": False, "channel": "error", "error": f"{notification.__class__.__name__}: {notification}"}
-                else:
-                    sent[key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
-                changed = True
-        if changed:
-            LIMIT_UP_BUY_SIGNAL_STATE.write_text(json.dumps(sent, ensure_ascii=False, indent=2), encoding="utf-8")
+        await _deliver_notifications(
+            sent,
+            "next-day-t1-or-cancel",
+            cancel_pending,
+            lambda item, t1_locked=False: STATE.notifications.notify_next_day_cancel_signal(item, t1_locked),
+            lambda item, t1_locked=False: {"state": item.get("state"), "t1_locked": t1_locked},
+        )
+        LIMIT_UP_BUY_SIGNAL_STATE.write_text(json.dumps(sent, ensure_ascii=False, indent=2), encoding="utf-8")
     payload["event"] = "limit-up"
     payload["runtime"] = STATE.runtime_status()
     payload["tick_driven"] = tick_driven
     payload["permission"] = _limit_up_trade_permission(payload)
+    payload["notification_reliability"] = _notification_reliability_payload()
     await STATE.publish_limit_up(payload)
     return payload
 
@@ -322,6 +335,113 @@ def _official_buy_should_cancel(item: dict[str, Any]) -> bool:
     return False
 
 
+async def _deliver_notifications(
+    state: dict[str, Any],
+    kind: str,
+    pending: list[tuple[Any, ...]],
+    sender: Any,
+    metadata_builder: Any | None = None,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    ledger = _load_json_dict(LIMIT_UP_NOTIFICATION_LEDGER)
+    for entry in pending:
+        key = str(entry[0])
+        args = entry[1:]
+        item = args[0] if args and isinstance(args[0], dict) else {}
+        started = time.time()
+        previous = state.get(key) if isinstance(state.get(key), dict) else {}
+        attempts = int(_number(previous.get("attempts"))) + 1
+        try:
+            notification = await asyncio.to_thread(sender, *args)
+            record = {
+                "key": key,
+                "kind": kind,
+                "code": str(item.get("code") or ""),
+                "name": str(item.get("name") or ""),
+                "title": notification.title,
+                "ts": started,
+                "first_ts": previous.get("first_ts") or started,
+                "last_attempt_ts": started,
+                "attempts": attempts,
+                "sent": bool(notification.sent),
+                "channel": notification.channel,
+                "error": notification.error,
+                "elapsed_ms": float(notification.elapsed_ms or round((time.time() - started) * 1000, 1)),
+                "target": notification.target,
+                "metadata": metadata_builder(*args) if metadata_builder else {},
+            }
+        except Exception as error:  # noqa: BLE001 - failed push must be recorded and retried later
+            record = {
+                "key": key,
+                "kind": kind,
+                "code": str(item.get("code") or ""),
+                "name": str(item.get("name") or ""),
+                "title": str(item.get("action") or kind),
+                "ts": started,
+                "first_ts": previous.get("first_ts") or started,
+                "last_attempt_ts": started,
+                "attempts": attempts,
+                "sent": False,
+                "channel": "error",
+                "error": f"{error.__class__.__name__}: {error}",
+                "elapsed_ms": round((time.time() - started) * 1000, 1),
+                "target": "",
+                "metadata": metadata_builder(*args) if metadata_builder else {},
+            }
+        state[key] = record
+        ledger[key] = record
+        results.append((item, record))
+    if pending:
+        _write_notification_ledger(ledger)
+    return results
+
+
+def _notification_due(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return True
+    if record.get("sent") or record.get("channel") in {"disabled", "record"}:
+        return False
+    retry_sec = int(_number(STATE.notifications.status().get("failed_retry_sec")) or 10)
+    last_attempt = _number(record.get("last_attempt_ts") or record.get("ts"))
+    return time.time() - last_attempt >= retry_sec
+
+
+def _write_notification_ledger(ledger: dict[str, Any]) -> None:
+    rows = sorted((row for row in ledger.values() if isinstance(row, dict)), key=lambda item: _number(item.get("last_attempt_ts") or item.get("ts")), reverse=True)[:1000]
+    payload = {str(row.get("key") or index): row for index, row in enumerate(rows)}
+    LIMIT_UP_NOTIFICATION_LEDGER.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _notification_reliability_payload() -> dict[str, Any]:
+    ledger = _load_json_dict(LIMIT_UP_NOTIFICATION_LEDGER)
+    rows = [row for row in ledger.values() if isinstance(row, dict)]
+    recent = sorted(rows, key=lambda item: _number(item.get("last_attempt_ts") or item.get("ts")), reverse=True)[:100]
+    sent = len([row for row in recent if row.get("sent") or row.get("channel") in {"disabled", "record"}])
+    failed = len([row for row in recent if not row.get("sent") and row.get("channel") not in {"disabled", "record"}])
+    elapsed = [_number(row.get("elapsed_ms")) for row in recent if _number(row.get("elapsed_ms")) > 0]
+    pending_retry = len([row for row in rows if _notification_due(row)])
+    return {
+        "sample_count": len(recent),
+        "success_count": sent,
+        "failure_count": failed,
+        "success_rate": round(sent / len(recent) * 100, 1) if recent else 0,
+        "avg_elapsed_ms": round(sum(elapsed) / len(elapsed), 1) if elapsed else 0,
+        "pending_retry_count": pending_retry,
+        "last_error": next((str(row.get("error") or "") for row in recent if row.get("error")), ""),
+        "recent": recent[:20],
+    }
+
+
+def _limit_up_open_plan(open_pct: float, pnl_pct: float) -> dict[str, str]:
+    if open_pct >= 2:
+        return {"rule": "hold-high-open-support", "text": f"高开{open_pct:.2f}%，先看承接，站上开盘价和分时均价则继续持仓。"}
+    if open_pct <= -2:
+        return {"rule": "reduce-weak-open", "text": f"低开{open_pct:.2f}%，若不能快速站回开盘价，优先减仓/清仓。"}
+    if pnl_pct <= -2:
+        return {"rule": "reduce-near-cost-stop", "text": f"接近成本风控，若开盘后继续走弱，不恋战。"}
+    return {"rule": "watch-open-support", "text": "平开附近，观察前15分钟承接，跌破开盘价或分时均价减仓。"}
+
+
 async def maybe_monitor_position_risk_signals(tick_driven: bool = False) -> list[dict[str, Any]]:
     current = datetime.now(CN_TZ)
     session = ashare_session(current)
@@ -348,19 +468,21 @@ async def maybe_monitor_position_risk_signals(tick_driven: bool = False) -> list
 
     state = _load_json_dict(LIMIT_UP_POSITION_SIGNAL_STATE)
     sent: list[dict[str, Any]] = []
-    changed = False
     date_key = str(session.get("date") or current.strftime("%Y-%m-%d"))
+    pending: list[tuple[str, dict[str, Any]]] = []
     for alert in alerts:
         key = f"{date_key}:{alert.get('code')}:{alert.get('kind')}"
-        if key in state:
-            continue
-        notification = await asyncio.to_thread(STATE.notifications.notify_position_risk, alert)
-        if notification.sent or notification.channel in {"disabled", "record"}:
-            state[key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
-            sent.append(alert)
-            changed = True
-    if changed:
-        LIMIT_UP_POSITION_SIGNAL_STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        if _notification_due(state.get(key)):
+            pending.append((key, alert))
+    results = await _deliver_notifications(
+        state,
+        "position-risk",
+        pending,
+        lambda item: STATE.notifications.notify_position_risk(item),
+        lambda item: {"kind": item.get("kind"), "action": item.get("action"), "sell_rule": item.get("sell_rule")},
+    )
+    sent = [item for item, result in results if result.get("sent") or result.get("channel") in {"disabled", "record"}]
+    LIMIT_UP_POSITION_SIGNAL_STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     return sent
 
 
@@ -384,6 +506,9 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
         high_price = _number(quote.get("high")) or current_price
         low_price = _number(quote.get("low")) or current_price
         prev_close = _number(quote.get("prev_close"))
+        amount = _number(quote.get("amount"))
+        volume = _number(quote.get("volume"))
+        intraday_avg = amount / volume / 100 if amount > 0 and volume > 0 else 0
         if not code or buy_price <= 0 or current_price <= 0:
             continue
         pnl_pct = (current_price / buy_price - 1) * 100
@@ -410,15 +535,18 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
                     **base,
                     "kind": "t1-risk",
                     "action": "T+1持仓风险",
+                    "sell_rule": "t1-locked-watch",
                     "reason": f"今日新买入不可卖，现较成本{pnl_pct:.2f}%；只记录风险，明日按开盘承接处理。",
                 })
             continue
         if is_limit_up and phase in {"CALL_AUCTION", "PRE_OPEN"}:
+            plan = _limit_up_open_plan(open_pct, pnl_pct)
             alerts.append({
                 **base,
                 "kind": "open-plan",
                 "action": "持仓开盘计划",
-                "reason": f"成本{buy_price:.2f}，止损{stop_price:.2f}；高开不追加，跌破开盘价或成本-3%先减仓。",
+                "sell_rule": plan["rule"],
+                "reason": f"{plan['text']} 成本{buy_price:.2f}，止损{stop_price:.2f}；明日卖点以开盘承接和分时均价为准。",
             })
             continue
         hard_stop_pct = -3 if is_limit_up else -5
@@ -428,7 +556,17 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
                 **base,
                 "kind": "hard-stop",
                 "action": "清仓风控",
+                "sell_rule": "clear-hard-stop",
                 "reason": f"现价较成本{pnl_pct:.2f}%，触发{hard_stop_pct}%止损线{hard_stop_price:.2f}。",
+            })
+            continue
+        if is_limit_up and intraday_avg and current_price < intraday_avg * 0.995 and current_price < open_price:
+            alerts.append({
+                **base,
+                "kind": "break-vwap",
+                "action": "跌破分时均线",
+                "sell_rule": "reduce-below-vwap",
+                "reason": f"现价{current_price:.2f}跌破分时均价{intraday_avg:.2f}且低于开盘价，按纪律减仓/清仓。",
             })
             continue
         if is_limit_up and open_price and current_price < open_price * 0.98 and low_price < open_price * 0.985:
@@ -436,6 +574,7 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
                 **base,
                 "kind": "break-open",
                 "action": "持仓减仓",
+                "sell_rule": "reduce-below-open",
                 "reason": f"跌破开盘价2%，开盘{open_price:.2f}，现价{current_price:.2f}，优先保护本金。",
             })
             continue
@@ -446,14 +585,35 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
                 **base,
                 "kind": "profit-protect",
                 "action": "冲高回落减仓",
+                "sell_rule": "reduce-profit-drawdown",
                 "reason": f"盘中最高盈利{high_profit_pct:.2f}%，现从高点回落{abs(drawdown_from_high):.2f}%，先锁利润。",
             })
             continue
+        if is_limit_up and prev_close and high_price >= prev_close * 1.095 and current_price < prev_close * 1.085:
+            alerts.append({
+                **base,
+                "kind": "open-board-fade",
+                "action": "炸板回落",
+                "sell_rule": "reduce-open-board-fade",
+                "reason": f"盘中触及涨停附近后回落，现价{current_price:.2f}，未能回封先减仓。",
+            })
+            continue
+        if is_limit_up and open_pct >= 2 and current_price >= open_price and pnl_pct > -1:
+            if phase in {"MORNING", "AFTERNOON"} and not (intraday_avg and current_price < intraday_avg * 0.995):
+                alerts.append({
+                    **base,
+                    "kind": "high-open-hold",
+                    "action": "高开承接持有",
+                    "sell_rule": "hold-while-above-open-vwap",
+                    "reason": f"高开{open_pct:.2f}%且站上开盘价，先持有；跌破开盘价或分时均价再减。",
+                })
+                continue
         if pnl_pct >= (8 if is_limit_up else 12):
             alerts.append({
                 **base,
                 "kind": "profit-watch",
                 "action": "持仓止盈观察",
+                "sell_rule": "watch-profit-trail",
                 "reason": f"当前盈利{pnl_pct:.2f}%，若明显回落先减仓。",
             })
         elif is_limit_up and open_pct <= -2 and phase in {"MORNING", "AFTERNOON"}:
@@ -461,6 +621,7 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
                 **base,
                 "kind": "weak-open",
                 "action": "低开弱承接",
+                "sell_rule": "reduce-weak-open",
                 "reason": f"低开{open_pct:.2f}%，若不能快速站回开盘价，按持仓减仓处理。",
             })
     return alerts
@@ -659,15 +820,19 @@ def _build_system_buy_row(row: dict[str, Any], allocation: float, trade_date: st
     raw_entry = _number(row.get("official_entry_price") or row.get("entry_price") or row.get("official_trigger_price") or row.get("trigger_price") or row.get("open") or row.get("price"))
     entry_price = raw_entry * (1 + LIMIT_UP_SYSTEM_SLIPPAGE_RATE) if raw_entry > 0 else 0
     price = _number(row.get("price")) or raw_entry or entry_price
-    shares = int(allocation / max(entry_price, 0.01) / 100) * 100 if entry_price > 0 else 0
+    execution_status = str(row.get("execution_status") or "simulated")
+    unavailable = bool(row.get("buy_unavailable")) or execution_status in {"missed", "abandoned"}
+    shares = 0 if unavailable else int(allocation / max(entry_price, 0.01) / 100) * 100 if entry_price > 0 else 0
     invested_amount = shares * entry_price
     fee = _trade_fee(invested_amount)
     pnl_amount = shares * (price - entry_price) - fee
     pnl_pct = (price / entry_price - 1) * 100 if entry_price > 0 else 0
     status, action = _system_position_status(row, pnl_pct)
     if shares <= 0:
-        status, action = "已剔除", "资金不足"
+        status, action = "未成交", "买不到/放弃" if unavailable else "资金不足"
     failure_reason = _system_failure_reason(row, pnl_pct)
+    if unavailable:
+        failure_reason = "买不到" if execution_status == "missed" or row.get("buy_unavailable") else "盘中放弃"
     if shares > 0 and status == "已剔除":
         status, action = "持有中", "T+1持有"
         failure_reason = failure_reason or "当日买入T+1不可卖"
@@ -678,6 +843,10 @@ def _build_system_buy_row(row: dict[str, Any], allocation: float, trade_date: st
         "rank": int(_number(row.get("official_rank")) or 0),
         "trade_date": trade_date,
         "trade_action": "buy",
+        "planned_action": "正式买点",
+        "actual_action": _system_actual_action(execution_status, shares),
+        "execution_status": execution_status,
+        "t1_status": "当日买入不可卖" if shares > 0 else "",
         "entry_price": round(entry_price, 3),
         "price": round(price, 3),
         "allocated_capital": round(allocation, 2),
@@ -721,6 +890,10 @@ def _review_existing_system_position(position: dict[str, Any], row: dict[str, An
         "trade_date": trade_date,
         "opened_at": position.get("opened_at") or position.get("trade_date") or trade_date,
         "trade_action": "sell" if exit_position else "hold",
+        "planned_action": "次日持仓处理",
+        "actual_action": action,
+        "execution_status": "held",
+        "t1_status": "可卖出",
         "entry_price": round(entry_price, 3),
         "price": round(price, 3),
         "allocated_capital": round(_number(position.get("allocated_capital")) or invested_amount, 2),
@@ -754,6 +927,7 @@ def _position_from_review_row(row: dict[str, Any]) -> dict[str, Any]:
         "invested_amount": _number(row.get("invested_amount")),
         "allocated_capital": _number(row.get("allocated_capital")),
         "opened_at": row.get("opened_at") or row.get("trade_date"),
+        "execution_status": row.get("execution_status") or "",
     }
 
 
@@ -789,7 +963,20 @@ def _system_trade(side: str, row: dict[str, Any], day: dict[str, Any], reason: s
         "amount": round(amount, 2),
         "fee": round(_number(row.get("fee")), 2),
         "reason": reason,
+        "execution_status": row.get("execution_status") or "",
     }
+
+
+def _system_actual_action(execution_status: str, shares: int) -> str:
+    if execution_status == "filled":
+        return "实盘已成交"
+    if execution_status == "missed":
+        return "买不到未成交"
+    if execution_status == "abandoned":
+        return "盘中放弃"
+    if shares > 0:
+        return "系统模拟成交"
+    return "未成交"
 
 
 def _trade_fee(amount: float) -> float:
@@ -1475,6 +1662,7 @@ def notification_payload(limit: int = 50) -> dict[str, Any]:
     return {
         "notifications": STATE.notifications.latest(limit=max(1, min(limit, 200))),
         "status": STATE.notifications.status(watchlist_count=len(STATE.preferences.watchlist())),
+        "reliability": _notification_reliability_payload(),
     }
 
 

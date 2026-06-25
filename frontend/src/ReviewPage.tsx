@@ -169,7 +169,9 @@ export function ReviewPage() {
               <MetricCell label="盈亏" value={formatMoney(item.pnl_amount)} tone={trendClass(item.pnl_amount)} />
               <MetricCell label="收益" value={formatPct(item.pnl_pct)} tone={trendClass(item.pnl_pct)} />
               <MetricCell label="费用" value={formatMoney(item.fee || 0, false)} />
-              <p>{item.failure_reason || item.state || "按纪律执行"}</p>
+              <MetricCell label="计划" value={item.planned_action || "--"} />
+              <MetricCell label="实际" value={item.actual_action || item.action || "--"} />
+              <p>{item.t1_status ? `${item.t1_status} · ` : ""}{item.failure_reason || item.state || "按纪律执行"}</p>
             </article>
           ))}
           {!selected?.rows.length ? <EmptyReview text="暂无账户明细" /> : null}
@@ -217,8 +219,9 @@ function PositionCard({ item }: { item: LimitUpSystemReviewRow }) {
         <MetricCell label="股数" value={`${item.shares}`} />
         <MetricCell label="市值" value={formatMoney(item.market_value || 0, false)} />
         <MetricCell label="盈亏" value={formatMoney(item.pnl_amount)} tone={trendClass(item.pnl_amount)} />
+        <MetricCell label="处理" value={item.actual_action || item.action || "--"} />
       </div>
-      <p>{item.state || "继续观察"}</p>
+      <p>{item.t1_status ? `${item.t1_status} · ` : ""}{item.state || "继续观察"}</p>
     </article>
   );
 }
@@ -235,7 +238,7 @@ function TradeRow({ trade, index }: { trade: LimitUpSystemTrade; index: number }
       <MetricCell label="股数" value={`${trade.shares}`} />
       <MetricCell label="金额" value={formatMoney(trade.amount, false)} />
       <MetricCell label="费用" value={formatMoney(trade.fee, false)} />
-      <p>{trade.reason}</p>
+      <p>{trade.execution_status ? `${executionLabel(trade.execution_status)} · ` : ""}{trade.reason}</p>
     </article>
   );
 }
@@ -276,6 +279,15 @@ function actionLabel(action?: string) {
   if (action === "sell") return "已卖出";
   if (action === "hold") return "持仓";
   return "记录";
+}
+
+function executionLabel(value?: string) {
+  if (value === "filled") return "实盘成交";
+  if (value === "missed") return "买不到";
+  if (value === "abandoned") return "已放弃";
+  if (value === "simulated") return "系统模拟";
+  if (value === "held") return "持仓处理";
+  return value || "--";
 }
 
 function accountSummary(record: LimitUpSystemReviewRecord | null) {

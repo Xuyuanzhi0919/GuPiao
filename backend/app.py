@@ -41,11 +41,12 @@ from server import (
     snapshot_payload,
     start_history_backtest_job,
     _limit_up_trade_permission,
+    _notification_reliability_payload,
 )
 from historical_backtest import fetch_eastmoney_minute_bars, rapid_rise_history_backtest, rapid_rise_multi_date_backtest
 from market_quotes import fetch_market_quotes
 from openclaw_review import run_openclaw_strategy_review
-from market_clock import is_trading_date
+from market_clock import ashare_session, is_trading_date
 from universe import add_code, remove_code, universe_payload
 
 
@@ -396,6 +397,8 @@ async def api_limit_up_next_day_monitor(date: str = "", notify: bool = False) ->
             sent.append(notification.__dict__)
     payload["notifications"] = sent
     payload["permission"] = await asyncio.to_thread(_limit_up_trade_permission, payload)
+    payload["runtime"] = STATE.runtime_status()
+    payload["notification_reliability"] = await asyncio.to_thread(_notification_reliability_payload)
     return payload
 
 
