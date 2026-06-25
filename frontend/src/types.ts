@@ -556,6 +556,10 @@ export interface LimitUpNextDayRow {
   official_trigger_price?: number;
   official_entry_price?: number;
   official_reason?: string;
+  execution_status?: "triggered" | "filled" | "missed" | "abandoned" | string;
+  execution_price?: number;
+  execution_shares?: number;
+  execution_note?: string;
   openclaw_tier?: "core" | "watch" | "avoid" | "rule" | "unavailable" | string;
   openclaw_score?: number;
   openclaw_summary?: string;
@@ -571,6 +575,8 @@ export interface LimitUpNextDayRow {
   kline_last_time?: string;
   kline_rise_3m_pct?: number;
   kline_vwap?: number;
+  kline_dimensions?: Record<string, number>;
+  sector_trend?: "enhancing" | "normal" | "fading" | string;
   risk_note: string;
 }
 
@@ -600,6 +606,17 @@ export interface LimitUpNextDayPayload {
     today_pool_ignored: boolean;
     updated_at: number;
     source: string;
+  };
+  permission?: {
+    status: "normal" | "reduced" | "blocked" | string;
+    label: string;
+    level: string;
+    reason: string;
+    loss_streak: number;
+    max_drawdown_pct: number;
+    failed_today: number;
+    remaining_slots: number;
+    equity: number;
   };
   summary: {
     watch_count: number;
@@ -741,6 +758,7 @@ export interface Position {
   buy_price: number;
   shares: number;
   source?: "limit-up" | "trend" | "manual" | string;
+  buy_date?: string;
   updated_ts?: number;
 }
 

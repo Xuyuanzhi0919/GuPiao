@@ -4532,6 +4532,21 @@ small.ai-evidence {
   padding: 5px 7px;
 }
 
+.limit-command-rules b.permission-normal {
+  background: rgba(18, 183, 106, 0.1);
+  color: #067647;
+}
+
+.limit-command-rules b.permission-reduced {
+  background: rgba(247, 144, 9, 0.12);
+  color: #b54708;
+}
+
+.limit-command-rules b.permission-blocked {
+  background: rgba(217, 45, 32, 0.1);
+  color: var(--red);
+}
+
 .limit-lead-card {
   display: grid;
   align-content: start;
@@ -5056,6 +5071,21 @@ small.ai-evidence {
   line-height: 1.4;
 }
 
+.limit-risk-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.limit-execution-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-left: auto;
+}
+
 .limit-buy-button {
   flex: 0 0 auto;
   margin-left: auto;
@@ -5065,6 +5095,20 @@ small.ai-evidence {
   color: var(--red);
   font-size: 12px;
   font-weight: 900;
+  padding: 5px 8px;
+}
+
+.limit-execution-actions .limit-buy-button {
+  margin-left: 0;
+}
+
+.limit-execution-actions button:not(.limit-buy-button) {
+  border: 1px solid var(--soft-line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
   padding: 5px 8px;
 }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ class PositionStore:
     def payload(self) -> dict[str, list[dict[str, Any]]]:
         return {"positions": sorted(self._data.values(), key=lambda item: item.get("updated_ts", 0), reverse=True)}
 
-    def upsert(self, code: str, name: str = "", sector: str = "", price: str | float = 0, shares: str | int = 0, source: str = "") -> dict[str, list[dict[str, Any]]]:
+    def upsert(self, code: str, name: str = "", sector: str = "", price: str | float = 0, shares: str | int = 0, source: str = "", buy_date: str = "") -> dict[str, list[dict[str, Any]]]:
         normalized = normalize_code(code)
         buy_price = max(0.0, self._float(price))
         share_count = max(0, int(self._float(shares)))
@@ -33,6 +34,7 @@ class PositionStore:
             "buy_price": round(buy_price, 3),
             "shares": share_count,
             "source": source or current.get("source") or "manual",
+            "buy_date": buy_date or current.get("buy_date") or datetime.now().strftime("%Y-%m-%d"),
             "updated_ts": time.time(),
         }
         self._save()
@@ -72,6 +74,7 @@ class PositionStore:
                     "buy_price": round(buy_price, 3),
                     "shares": shares,
                     "source": str(row.get("source") or _default_position_source(code, str(row.get("sector") or ""), str(row.get("name") or ""))),
+                    "buy_date": str(row.get("buy_date") or ""),
                     "updated_ts": float(row.get("updated_ts") or 0),
                 }
         return data

@@ -40,6 +40,7 @@ from server import (
     notification_payload,
     snapshot_payload,
     start_history_backtest_job,
+    _limit_up_trade_permission,
 )
 from historical_backtest import fetch_eastmoney_minute_bars, rapid_rise_history_backtest, rapid_rise_multi_date_backtest
 from market_quotes import fetch_market_quotes
@@ -394,12 +395,29 @@ async def api_limit_up_next_day_monitor(date: str = "", notify: bool = False) ->
             notification = STATE.notifications.notify_next_day_buy_signal(item)
             sent.append(notification.__dict__)
     payload["notifications"] = sent
+    payload["permission"] = await asyncio.to_thread(_limit_up_trade_permission, payload)
     return payload
 
 
 @app.get("/api/limit-up/system-review")
 async def api_limit_up_system_review(date: str = "") -> dict[str, Any]:
     return await asyncio.to_thread(limit_up_system_review_payload, date)
+
+
+@app.get("/api/limit-up/execution")
+async def api_limit_up_execution(date: str = "", code: str = "", status: str = "triggered", price: str = "0", shares: str = "0", note: str = "") -> dict[str, Any]:
+    trade_date = date or str(ashare_session().get("date") or "")
+    payload = await asyncio.to_thread(STATE.limit_up_monitor.update_official_execution, trade_date, code, status, float(price or 0), int(float(shares or 0)), note)
+    if status == "filled":
+        item = next((row for row in payload.get("items") or [] if row.get("code") == code), {})
+        name = str(item.get("name") or code)
+        sector = str(item.get("sector") or "--")
+        trade_price = float(price or item.get("execution_price") or item.get("entry_price") or item.get("price") or 0)
+        trade_shares = int(float(shares or item.get("execution_shares") or 0))
+        if trade_price > 0 and trade_shares > 0:
+            STATE.positions.upsert(code=code, name=name, sector=sector, price=trade_price, shares=trade_shares, source="limit-up", buy_date=trade_date)
+            STATE.trade_records.add(code=code, name=name, sector=sector, side="buy", price=trade_price, shares=trade_shares, reason=note or "系统打板成交", source="limit-up-execution")
+    return {"date": trade_date, "code": code, "status": status, "official": payload, "positions": STATE.positions.payload()}
 
 
 @app.get("/api/preferences")
@@ -438,8 +456,8 @@ async def api_positions() -> dict[str, Any]:
 
 
 @app.get("/api/positions/upsert")
-async def api_positions_upsert(code: str = "", name: str = "", sector: str = "", price: str = "0", shares: str = "0", source: str = "") -> dict[str, Any]:
-    return STATE.positions.upsert(code=code, name=name, sector=sector, price=price, shares=shares, source=source)
+async def api_positions_upsert(code: str = "", name: str = "", sector: str = "", price: str = "0", shares: str = "0", source: str = "", buy_date: str = "") -> dict[str, Any]:
+    return STATE.positions.upsert(code=code, name=name, sector=sector, price=price, shares=shares, source=source, buy_date=buy_date)
 
 
 @app.get("/api/positions/remove")

@@ -267,11 +267,33 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
                 continue
             sent[key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
             changed = True
+        cancel_candidates = [
+            item for item in payload.get("rows", [])
+            if item.get("official_buy") and _official_buy_should_cancel(item)
+        ]
+        cancel_pending = []
+        for item in cancel_candidates:
+            t1_locked = str(item.get("execution_status") or "") == "filled"
+            key = f"{payload.get('date')}:{item.get('code')}:{'t1-risk' if t1_locked else 'cancel'}"
+            if key not in sent:
+                cancel_pending.append((key, item, t1_locked))
+        if cancel_pending:
+            cancel_results = await asyncio.gather(
+                *(asyncio.to_thread(STATE.notifications.notify_next_day_cancel_signal, item, t1_locked) for _, item, t1_locked in cancel_pending),
+                return_exceptions=True,
+            )
+            for (key, _item, _t1_locked), notification in zip(cancel_pending, cancel_results, strict=False):
+                if isinstance(notification, Exception):
+                    sent[key] = {"ts": time.time(), "sent": False, "channel": "error", "error": f"{notification.__class__.__name__}: {notification}"}
+                else:
+                    sent[key] = {"ts": time.time(), "sent": notification.sent, "channel": notification.channel, "error": notification.error}
+                changed = True
         if changed:
             LIMIT_UP_BUY_SIGNAL_STATE.write_text(json.dumps(sent, ensure_ascii=False, indent=2), encoding="utf-8")
     payload["event"] = "limit-up"
     payload["runtime"] = STATE.runtime_status()
     payload["tick_driven"] = tick_driven
+    payload["permission"] = _limit_up_trade_permission(payload)
     await STATE.publish_limit_up(payload)
     return payload
 
@@ -283,6 +305,21 @@ def _next_day_notification_stage(item: dict[str, Any]) -> str:
     if item.get("kline_signal") == "weak" or state in {"风险观察", "放弃"}:
         return "risk"
     return "entry"
+
+
+def _official_buy_should_cancel(item: dict[str, Any]) -> bool:
+    execution = str(item.get("execution_status") or "")
+    if execution in {"missed", "abandoned"}:
+        return False
+    if item.get("buy_unavailable") or str(item.get("state") or "") in {"买不到", "放弃", "风险观察"}:
+        return True
+    if item.get("kline_signal") == "weak" and not item.get("sealed_today"):
+        return True
+    if _number(item.get("close_from_open_pct")) <= -2.5 and not item.get("sealed_today"):
+        return True
+    if _number(item.get("score")) < 34 and not item.get("sealed_today"):
+        return True
+    return False
 
 
 async def maybe_monitor_position_risk_signals(tick_driven: bool = False) -> list[dict[str, Any]]:
@@ -305,7 +342,7 @@ async def maybe_monitor_position_risk_signals(tick_driven: bool = False) -> list
     except Exception:
         return []
     quotes = quote_payload.get("quotes") or {}
-    alerts = _build_position_risk_alerts(positions, quotes, str(session.get("code") or ""))
+    alerts = _build_position_risk_alerts(positions, quotes, str(session.get("code") or ""), str(session.get("date") or current.strftime("%Y-%m-%d")))
     if not alerts:
         return []
 
@@ -336,7 +373,7 @@ def _is_stock_position(item: dict[str, Any]) -> bool:
     return code.startswith(("000", "001", "002", "003", "600", "601", "603", "605"))
 
 
-def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[str, Any], phase: str) -> list[dict[str, Any]]:
+def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[str, Any], phase: str, trade_date: str = "") -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
     for position in positions:
         code = str(position.get("code") or "")
@@ -354,6 +391,7 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
         stop_price = round(buy_price * 0.97, 3)
         source = str(position.get("source") or "manual")
         is_limit_up = source == "limit-up"
+        is_t0_locked = is_limit_up and str(position.get("buy_date") or "") == trade_date
         name = str(position.get("name") or quote.get("name") or code)
         base = {
             "code": code,
@@ -363,7 +401,18 @@ def _build_position_risk_alerts(positions: list[dict[str, Any]], quotes: dict[st
             "shares": position.get("shares"),
             "pnl_pct": round(pnl_pct, 2),
             "source": source,
+            "buy_date": position.get("buy_date") or "",
+            "t1_locked": is_t0_locked,
         }
+        if is_t0_locked and phase in {"MORNING", "AFTERNOON", "CLOSING_AUCTION"}:
+            if current_price < open_price * 0.98 or pnl_pct <= -3 or (high_price and current_price < high_price * 0.98):
+                alerts.append({
+                    **base,
+                    "kind": "t1-risk",
+                    "action": "T+1持仓风险",
+                    "reason": f"今日新买入不可卖，现较成本{pnl_pct:.2f}%；只记录风险，明日按开盘承接处理。",
+                })
+            continue
         if is_limit_up and phase in {"CALL_AUCTION", "PRE_OPEN"}:
             alerts.append({
                 **base,
@@ -618,6 +667,10 @@ def _build_system_buy_row(row: dict[str, Any], allocation: float, trade_date: st
     status, action = _system_position_status(row, pnl_pct)
     if shares <= 0:
         status, action = "已剔除", "资金不足"
+    failure_reason = _system_failure_reason(row, pnl_pct)
+    if shares > 0 and status == "已剔除":
+        status, action = "持有中", "T+1持有"
+        failure_reason = failure_reason or "当日买入T+1不可卖"
     return {
         "code": row.get("code") or "",
         "name": row.get("name") or row.get("code") or "",
@@ -640,7 +693,7 @@ def _build_system_buy_row(row: dict[str, Any], allocation: float, trade_date: st
         "state": row.get("state") or "",
         "action": action,
         "position_status": status,
-        "failure_reason": _system_failure_reason(row, pnl_pct),
+        "failure_reason": failure_reason,
     }
 
 
@@ -944,6 +997,36 @@ def _system_failure_attribution(records: list[dict[str, Any]]) -> list[dict[str,
     return [{"reason": key, "count": value} for key, value in sorted(counts.items(), key=lambda item: item[1], reverse=True)]
 
 
+def _limit_up_trade_permission(payload: dict[str, Any]) -> dict[str, Any]:
+    review = limit_up_system_review_payload(str(payload.get("date") or ""))
+    stats = review.get("stats") or {}
+    selected = review.get("selected") or {}
+    loss_streak = int(_number(stats.get("loss_streak")))
+    drawdown = _number(stats.get("max_drawdown_pct"))
+    failed_today = len([row for row in payload.get("rows") or [] if row.get("official_buy") and _official_buy_should_cancel(row)])
+    remaining = int(_number((payload.get("summary") or {}).get("remaining_buy_slots")) or 0)
+    if loss_streak >= 2 or drawdown <= -5 or failed_today >= 2:
+        status, label, level = "blocked", "今日停手", "danger"
+        reason = "连续亏损/回撤/盘中失败触发总闸门，只观察不新增打板。"
+    elif loss_streak == 1 or failed_today == 1 or remaining <= 1:
+        status, label, level = "reduced", "收缩出手", "warn"
+        reason = "只做核心票封板确认，非核心分时买点不再追。"
+    else:
+        status, label, level = "normal", "正常出手", "good"
+        reason = "按系统纪律执行：最多3只，只做强承接/封板确认。"
+    return {
+        "status": status,
+        "label": label,
+        "level": level,
+        "reason": reason,
+        "loss_streak": loss_streak,
+        "max_drawdown_pct": drawdown,
+        "failed_today": failed_today,
+        "remaining_slots": remaining,
+        "equity": selected.get("equity") or stats.get("equity") or LIMIT_UP_SYSTEM_CAPITAL,
+    }
+
+
 def _read_json_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -1063,11 +1146,31 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 notification = STATE.notifications.notify_next_day_buy_signal(item)
                 sent.append(notification.__dict__)
         payload["notifications"] = sent
+        payload["permission"] = _limit_up_trade_permission(payload)
         await send_json(writer, payload)
         return
     if path == "/api/limit-up/system-review":
         trade_date = query.get("date", [""])[0]
         await send_json(writer, await asyncio.to_thread(limit_up_system_review_payload, trade_date))
+        return
+    if path == "/api/limit-up/execution":
+        trade_date = query.get("date", [""])[0] or str(ashare_session().get("date") or "")
+        code = query.get("code", [""])[0]
+        status = query.get("status", ["triggered"])[0]
+        price = _number(query.get("price", ["0"])[0])
+        shares = int(_number(query.get("shares", ["0"])[0]))
+        note = query.get("note", [""])[0]
+        payload = await asyncio.to_thread(STATE.limit_up_monitor.update_official_execution, trade_date, code, status, price, shares, note)
+        if status == "filled":
+            item = next((row for row in payload.get("items") or [] if row.get("code") == code), {})
+            name = str(item.get("name") or code)
+            sector = str(item.get("sector") or "--")
+            trade_price = price or _number(item.get("execution_price") or item.get("entry_price") or item.get("price"))
+            trade_shares = shares or int(_number(item.get("execution_shares")))
+            if trade_price > 0 and trade_shares > 0:
+                STATE.positions.upsert(code=code, name=name, sector=sector, price=trade_price, shares=trade_shares, source="limit-up", buy_date=trade_date)
+                STATE.trade_records.add(code=code, name=name, sector=sector, side="buy", price=trade_price, shares=trade_shares, reason=note or "系统打板成交", source="limit-up-execution")
+        await send_json(writer, {"date": trade_date, "code": code, "status": status, "official": payload, "positions": STATE.positions.payload()})
         return
     if path == "/api/preferences":
         await send_json(writer, {"preferences": STATE.preferences.payload()})
@@ -1114,6 +1217,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 price=query.get("price", ["0"])[0],
                 shares=query.get("shares", ["0"])[0],
                 source=query.get("source", [""])[0],
+                buy_date=query.get("buy_date", [""])[0],
             ),
         )
         return

@@ -250,6 +250,44 @@ class LimitUpMonitor:
     def _official_buy_path(self, trade_date: str) -> Path:
         return self.data_dir / f"limit_up_official_buys_{trade_date}.json"
 
+    def update_official_execution(self, trade_date: str, code: str, status: str, price: float = 0, shares: int = 0, note: str = "") -> dict[str, Any]:
+        path = self._official_buy_path(trade_date)
+        payload = {}
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        items = [item for item in payload.get("items") or [] if isinstance(item, dict)]
+        normalized = normalize_code(code)
+        found = False
+        for item in items:
+            if str(item.get("code") or "") != normalized:
+                continue
+            item["execution_status"] = status
+            item["execution_price"] = price or item.get("execution_price") or item.get("entry_price") or item.get("price")
+            item["execution_shares"] = shares or item.get("execution_shares") or 0
+            item["execution_note"] = note
+            item["execution_updated_at"] = time.time()
+            found = True
+        if not found:
+            items.append({
+                "code": normalized,
+                "execution_status": status,
+                "execution_price": price,
+                "execution_shares": shares,
+                "execution_note": note,
+                "execution_updated_at": time.time(),
+            })
+        payload["date"] = trade_date
+        payload["items"] = items
+        payload["codes"] = [str(code) for code in payload.get("codes") or [] if str(code)] or [str(item.get("code")) for item in items if item.get("code")]
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        (self.data_dir / "limit_up_official_buys_latest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+
     def _lock_official_buy_signals(self, trade_date: str, opportunities: list[dict[str, Any]], rows: list[dict[str, Any]], allow_new_locks: bool = True) -> list[dict[str, Any]]:
         if trade_date < OFFICIAL_BUY_START_DATE:
             for row in rows:
@@ -272,7 +310,15 @@ class LimitUpMonitor:
                 locked_items = {}
         if allow_new_locks:
             row_by_code = {str(item.get("code") or ""): item for item in rows if item.get("code")}
-            locked_codes = [code for code in locked_codes if not _should_release_official_lock(row_by_code.get(code))]
+            next_locked_codes = []
+            for code in locked_codes:
+                execution = str((locked_items.get(code) or {}).get("execution_status") or "")
+                if execution in {"missed", "abandoned"}:
+                    continue
+                if execution != "filled" and _should_release_official_lock(row_by_code.get(code)):
+                    continue
+                next_locked_codes.append(code)
+            locked_codes = next_locked_codes
             locked_items = {code: item for code, item in locked_items.items() if code in locked_codes}
         sector_counts: dict[str, int] = {}
         for code in locked_codes:
@@ -305,6 +351,10 @@ class LimitUpMonitor:
                 row["official_trigger_price"] = old.get("trigger_price") or row.get("price")
                 row["official_entry_price"] = old.get("entry_price") or _entry_price(row)
                 row["official_reason"] = old.get("reason") or _official_reason(row)
+                row["execution_status"] = old.get("execution_status") or "triggered"
+                row["execution_price"] = old.get("execution_price") or 0
+                row["execution_shares"] = old.get("execution_shares") or 0
+                row["execution_note"] = old.get("execution_note") or ""
             if rank:
                 official.append(row)
         snapshot = {
@@ -326,6 +376,11 @@ class LimitUpMonitor:
                     "score": item.get("score"),
                     "price": item.get("price"),
                     "reasons": item.get("reasons"),
+                    "execution_status": item.get("execution_status") or "triggered",
+                    "execution_price": item.get("execution_price") or 0,
+                    "execution_shares": item.get("execution_shares") or 0,
+                    "execution_note": item.get("execution_note") or "",
+                    "execution_updated_at": item.get("execution_updated_at") or 0,
                 }
                 for item in official
             ],
@@ -1254,6 +1309,7 @@ def _analyze_intraday_kline(bars: list[Any]) -> dict[str, Any]:
     score_delta = 0
     reasons: list[str] = []
     risks: list[str] = []
+    dimensions = {"pull": 0, "reclaim": 0, "seal": 0, "vwap": 0, "volume": 0}
 
     total_volume = sum(volumes)
     total_amount = sum(amounts)
@@ -1262,13 +1318,16 @@ def _analyze_intraday_kline(bars: list[Any]) -> dict[str, Any]:
         vwap = total_amount / total_volume
     if open_price and last_close >= open_price:
         score_delta += 10
+        dimensions["reclaim"] += 10
         reasons.append("分时站稳开盘价")
     if vwap and last_close >= vwap:
         score_delta += 8
+        dimensions["vwap"] += 8
         reasons.append("价格站上分时均价")
     recent_lows = lows[-8:] if len(lows) >= 8 else lows
     if open_price and recent_lows and min(recent_lows) >= open_price * 0.985:
         score_delta += 8
+        dimensions["reclaim"] += 8
         reasons.append("回踩开盘不破")
     if len(bars) >= 4:
         base_close = float(getattr(bars[-4], "close", 0) or 0)
@@ -1280,18 +1339,23 @@ def _analyze_intraday_kline(bars: list[Any]) -> dict[str, Any]:
     volume_expanding = bool(avg_amount and last3_amount >= avg_amount * 3.2)
     if rise_3m_pct >= 1.0:
         score_delta += 10
+        dimensions["pull"] += 10
         reasons.append("3分钟上攻")
     if volume_expanding:
         score_delta += 8
+        dimensions["volume"] += 8
         reasons.append("分时放量")
     if prev_close and last_close >= prev_close * 1.085:
         score_delta += 14
+        dimensions["seal"] += 14
         reasons.append("逼近涨停确认")
     if open_price and last_close < open_price * 0.98:
         score_delta -= 24
+        dimensions["reclaim"] -= 12
         risks.append("跌破开盘承接")
     if vwap and last_close < vwap * 0.99:
         score_delta -= 12
+        dimensions["vwap"] -= 8
         risks.append("跌破分时均价")
     if lows and prev_close and min(lows[-5:]) < prev_close * 0.97:
         score_delta -= 10
@@ -1308,6 +1372,7 @@ def _analyze_intraday_kline(bars: list[Any]) -> dict[str, Any]:
         "rise_3m_pct": round(rise_3m_pct, 2),
         "vwap": round(vwap, 3) if vwap else 0,
         "bar_count": len(bars),
+        "dimensions": dimensions,
     }
 
 
@@ -1354,6 +1419,7 @@ def _build_next_day_rows(
         today_open_count = int(today_item.get("open_board_count") or 0)
         sector = str(source.get("sector") or quote.get("sector") or "未分组")
         theme = sector_strength.get(sector) or {}
+        sector_trend = _sector_trend(theme)
         score = 0
         reasons = []
         if sealed:
@@ -1374,6 +1440,12 @@ def _build_next_day_rows(
         if int(theme.get("limit_count") or 0) >= 3:
             score += 15
             reasons.append(f"{sector}板块确认")
+        if sector_trend == "enhancing":
+            score += 8
+            reasons.append("板块动态增强")
+        elif sector_trend == "fading":
+            score -= 8
+            reasons.append("板块退潮")
         tier = str(focus_item.get("openclaw_tier") or "")
         if tier == "core":
             score += 10
@@ -1461,10 +1533,23 @@ def _build_next_day_rows(
                 "kline_last_time": kline.get("last_time") or "",
                 "kline_rise_3m_pct": kline.get("rise_3m_pct", 0),
                 "kline_vwap": kline.get("vwap", 0),
+                "kline_dimensions": kline.get("dimensions") or {},
+                "sector_trend": sector_trend,
                 "risk_note": "只在强承接/封板确认时参与，低开或跌破开盘价放弃。",
             }
         )
     return sorted(rows, key=lambda item: (item["action"] == "BUY", item["score"], item["amount"]), reverse=True)
+
+
+def _sector_trend(theme: dict[str, Any]) -> str:
+    limit_count = int(theme.get("limit_count") or 0)
+    early_count = int(theme.get("early_count") or 0)
+    max_streak = int(theme.get("max_streak") or 0)
+    if limit_count >= 5 or (limit_count >= 3 and early_count >= 2) or max_streak >= 3:
+        return "enhancing"
+    if limit_count <= 1:
+        return "fading"
+    return "normal"
 
 
 def _is_buy_unavailable(first_time: Any, open_board_count: int, open_price: float = 0, low_price: float = 0, prev_close: float = 0, seal_amount: float = 0) -> bool:
@@ -1495,6 +1580,11 @@ def _official_candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, f
 def _should_release_official_lock(row: dict[str, Any] | None) -> bool:
     if not row:
         return False
+    execution = str(row.get("execution_status") or "")
+    if execution == "filled":
+        return False
+    if execution in {"missed", "abandoned"}:
+        return True
     state = str(row.get("state") or "")
     if row.get("buy_unavailable") or state in {"买不到", "放弃", "风险观察"}:
         return True

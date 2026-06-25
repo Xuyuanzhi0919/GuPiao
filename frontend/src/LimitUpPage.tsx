@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowDownWideNarrow, Bell, CalendarClock, ChevronDown, ChevronUp, Flame, RefreshCw, Search, ShieldAlert, Target, TrendingUp } from "lucide-react";
-import { addTradeRecord, fetchLimitUpNextDayMonitor, fetchLimitUpOpenClawReviewStatus, fetchLimitUpTomorrowFocus, fetchPositions, limitUpWebSocketUrl, startLimitUpOpenClawReview, upsertPosition } from "./api";
+import { fetchLimitUpNextDayMonitor, fetchLimitUpOpenClawReviewStatus, fetchLimitUpTomorrowFocus, fetchPositions, limitUpWebSocketUrl, startLimitUpOpenClawReview, updateLimitUpExecution } from "./api";
 import { formatMoney, formatPct } from "./format";
 import type { LimitUpNextDayPayload, LimitUpNextDayRow, LimitUpOpenClawJob, LimitUpSector, LimitUpStock, LimitUpTomorrowFocusPayload } from "./types";
 
@@ -93,14 +93,42 @@ export function LimitUpPage() {
       window.alert("买入股数需要大于 0");
       return;
     }
-    const position = { code: item.code, name: item.name, sector: item.sector, price, shares, source: "limit-up" };
     try {
-      await upsertPosition(position);
-      await addTradeRecord({ ...position, side: "buy", reason: `打板页买入：${item.state}${item.buy_unavailable ? "，人工确认成交" : ""}`, source: "limit-up-page" });
+      await updateLimitUpExecution({
+        code: item.code,
+        date: monitorPayload?.date || "",
+        note: `打板页确认成交：${item.state}${item.buy_unavailable ? "，人工确认买到" : ""}`,
+        price,
+        shares,
+        status: "filled",
+      });
       setBoughtCodes((current) => new Set(current).add(item.code));
-      setStatus(`已记录买入 ${item.name} ${shares}股，次日纳入持仓提醒`);
+      setStatus(`已确认成交 ${item.name} ${shares}股，今日 T+1 锁定，明日纳入卖出提醒`);
+      void load(false, true);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "买入记录失败");
+    }
+  }
+
+  async function markExecution(item: LimitUpNextDayRow, nextStatus: "missed" | "abandoned") {
+    try {
+      await updateLimitUpExecution({
+        code: item.code,
+        date: monitorPayload?.date || "",
+        note: nextStatus === "missed" ? "买不到/未成交" : "盘中放弃",
+        price: item.official_entry_price || item.official_trigger_price || item.price || 0,
+        shares: 0,
+        status: nextStatus,
+      });
+      setBoughtCodes((current) => {
+        const next = new Set(current);
+        next.delete(item.code);
+        return next;
+      });
+      setStatus(`${item.name} 已标记${nextStatus === "missed" ? "买不到" : "放弃"}，释放正式买点名额`);
+      void load(false, true);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "状态更新失败");
     }
   }
 
@@ -197,6 +225,7 @@ export function LimitUpPage() {
   const coreBrief = useMemo(() => (focusPayload?.focus || []).filter((item) => item.openclaw_tier === "core"), [focusPayload]);
   const activeBrief = useMemo(() => (monitorPayload?.rows || []).filter((item) => item.action === "WATCH"), [monitorPayload]);
   const quality = monitorPayload?.data_quality;
+  const permission = monitorPayload?.permission;
 
   const sortOptions = getSortOptions(tab);
   const rows = useMemo(() => {
@@ -261,11 +290,12 @@ export function LimitUpPage() {
             <strong>{command.title}</strong>
             <p>{command.detail}</p>
             <div className="limit-command-rules">
+              {permission ? <b className={`permission-${permission.status}`}>{permission.label}：{permission.reason}</b> : null}
               {command.rules.map((rule) => <b key={rule}>{rule}</b>)}
             </div>
           </div>
 
-          <LeadBuyCard boughtCodes={boughtCodes} item={leadBuy} fallback={leadFocus} onBuy={buyLimitUp} status={status} />
+          <LeadBuyCard boughtCodes={boughtCodes} item={leadBuy} fallback={leadFocus} onBuy={buyLimitUp} onExecution={markExecution} status={status} />
 
           <div className="limit-score-strip">
             <LimitMetric icon={<Target size={16} />} label={focusDayLabel} value={focusPayload?.summary.focus_count ?? "--"} />
@@ -274,6 +304,7 @@ export function LimitUpPage() {
             <LimitMetric icon={<TrendingUp size={16} />} label={`今日涨停池${monitorPayload?.date ? ` ${monitorPayload.date}` : ""}`} value={monitorPayload?.summary.today_limit_count ?? monitorPayload?.today_pool?.length ?? "--"} />
             <LimitMetric icon={<CalendarClock size={16} />} label="当前阶段" value={monitorPayload?.phase?.label ?? "--"} />
             <LimitMetric icon={<TrendingUp size={16} />} label="正式买点" value={`${monitorPayload?.summary.buy_signal_count ?? "--"}/3`} />
+            <LimitMetric icon={<ShieldAlert size={16} />} label="出手权限" value={permission?.label ?? "--"} />
             <LimitMetric icon={<RefreshCw size={16} />} label="分时就绪" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
             <LimitMetric icon={<CalendarClock size={16} />} label="数据更新" value={quality?.updated_at ? ageText(quality.updated_at) : "--"} />
           </div>
@@ -364,7 +395,7 @@ export function LimitUpPage() {
           <section className="limit-grid">
             {loading && !focusPayload && !monitorPayload ? <div className="empty">加载隔日监控数据中...</div> : null}
             {!loading && !rows.length ? <div className="empty">暂无匹配数据</div> : null}
-            {tab === "buy" ? (rows as LimitUpNextDayRow[]).map((item) => <BuyCard bought={boughtCodes.has(item.code)} item={item} key={item.code} onBuy={buyLimitUp} />) : null}
+            {tab === "buy" ? (rows as LimitUpNextDayRow[]).map((item) => <BuyCard bought={boughtCodes.has(item.code)} item={item} key={item.code} onBuy={buyLimitUp} onExecution={markExecution} />) : null}
             {tab === "focus" || tab === "watch" || tab === "today" ? (rows as LimitUpStock[]).map((item) => <FocusCard item={item} key={item.code} />) : null}
             {tab === "sectors" ? (rows as LimitUpSector[]).map((item) => <SectorCard item={item} key={item.sector} />) : null}
           </section>
@@ -374,8 +405,23 @@ export function LimitUpPage() {
   );
 }
 
-function LeadBuyCard({ boughtCodes, item, fallback, onBuy, status }: { boughtCodes: Set<string>; item?: LimitUpNextDayRow; fallback?: LimitUpStock; onBuy: (item: LimitUpNextDayRow) => void; status?: string }) {
+function LeadBuyCard({
+  boughtCodes,
+  item,
+  fallback,
+  onBuy,
+  onExecution,
+  status,
+}: {
+  boughtCodes: Set<string>;
+  item?: LimitUpNextDayRow;
+  fallback?: LimitUpStock;
+  onBuy: (item: LimitUpNextDayRow) => void;
+  onExecution: (item: LimitUpNextDayRow, status: "missed" | "abandoned") => void;
+  status?: string;
+}) {
   const bought = item ? boughtCodes.has(item.code) : false;
+  const buyStatus = item ? buyRecordStatus(item, bought) : null;
   return (
     <div className="limit-lead-card">
       <header>
@@ -387,7 +433,15 @@ function LeadBuyCard({ boughtCodes, item, fallback, onBuy, status }: { boughtCod
           <h2>{item.name} <small>{item.code}</small></h2>
           <p>{item.state} · {item.sector} · 触发{priceText(item.official_trigger_price || item.price)} · 模拟{priceText(item.official_entry_price || item.price)}</p>
           <div className="limit-tags">{item.reasons.slice(0, 4).map((reason) => <i key={reason}>{reason}</i>)}</div>
-          <button className="limit-buy-button" disabled={bought} onClick={() => onBuy(item)} type="button">{bought ? "已买入" : "记录买入"}</button>
+          <div className="limit-execution-actions">
+            <button className="limit-buy-button" disabled={buyStatus?.disabled} onClick={() => onBuy(item)} type="button">{buyStatus?.button || "确认成交"}</button>
+            {item.official_buy && item.execution_status !== "filled" ? (
+              <>
+                <button onClick={() => onExecution(item, "missed")} type="button">买不到</button>
+                <button onClick={() => onExecution(item, "abandoned")} type="button">放弃</button>
+              </>
+            ) : null}
+          </div>
         </>
       ) : fallback ? (
         <>
@@ -608,11 +662,22 @@ function timeValue(value?: string) {
   return (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
 }
 
-function BuyCard({ bought, item, onBuy }: { bought: boolean; item: LimitUpNextDayRow; onBuy: (item: LimitUpNextDayRow) => void }) {
+function BuyCard({
+  bought,
+  item,
+  onBuy,
+  onExecution,
+}: {
+  bought: boolean;
+  item: LimitUpNextDayRow;
+  onBuy: (item: LimitUpNextDayRow) => void;
+  onExecution: (item: LimitUpNextDayRow, status: "missed" | "abandoned") => void;
+}) {
   const klineText = klineSignalLabel(item.kline_signal);
   const sourceText = klineSourceLabel(item.kline_source);
   const canBuy = item.action !== "PASS";
   const status = buyRecordStatus(item, bought);
+  const showManualActions = item.official_buy && item.execution_status !== "filled" && item.execution_status !== "missed" && item.execution_status !== "abandoned";
   return (
     <article className={`limit-card ${item.action.toLowerCase()}`}>
       <header>
@@ -630,21 +695,48 @@ function BuyCard({ bought, item, onBuy }: { bought: boolean; item: LimitUpNextDa
         ["分时", `${klineText}/${sourceText}`],
         ["最新分钟", minuteTime(item.kline_last_time)],
         ["3分钟", formatPct(item.kline_rise_3m_pct || 0)],
+        ["板块", sectorTrendLabel(item.sector_trend)],
+        ["五维", dimensionSummary(item)],
       ]} />
       <div className="limit-tags">{item.reasons.map((reason) => <i key={reason}>{reason}</i>)}</div>
       <footer>
-        <ShieldAlert size={14} />{item.risk_note}
-        {canBuy ? <button className="limit-buy-button" disabled={status.disabled} onClick={() => onBuy(item)} type="button">{status.button}</button> : null}
+        <span className="limit-risk-text"><ShieldAlert size={14} />{item.risk_note}</span>
+        {canBuy ? (
+          <div className="limit-execution-actions">
+            <button className="limit-buy-button" disabled={status.disabled} onClick={() => onBuy(item)} type="button">{status.button}</button>
+            {showManualActions ? (
+              <>
+                <button onClick={() => onExecution(item, "missed")} type="button">买不到</button>
+                <button onClick={() => onExecution(item, "abandoned")} type="button">放弃</button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </footer>
     </article>
   );
 }
 
 function buyRecordStatus(item: LimitUpNextDayRow, bought: boolean) {
+  if (item.execution_status === "filled") return { badge: "已成交", button: "已成交", disabled: true };
+  if (item.execution_status === "missed") return { badge: "买不到", button: "买不到", disabled: true };
+  if (item.execution_status === "abandoned") return { badge: "已放弃", button: "已放弃", disabled: true };
   if (bought) return { badge: "已记录", button: "已记录买入", disabled: true };
-  if (item.official_buy) return { badge: `系统#${item.official_rank || ""}`, button: "记录实盘买入", disabled: false };
+  if (item.official_buy) return { badge: `系统#${item.official_rank || ""}`, button: "确认成交", disabled: false };
   if (item.buy_unavailable) return { badge: "买不到", button: "人工确认成交", disabled: false };
   return { badge: `${item.score.toFixed(0)}分`, button: "记录买入", disabled: false };
+}
+
+function sectorTrendLabel(value?: string) {
+  if (value === "enhancing") return "增强";
+  if (value === "fading") return "退潮";
+  if (value === "normal") return "正常";
+  return "--";
+}
+
+function dimensionSummary(item: LimitUpNextDayRow) {
+  const dimensions = item.kline_dimensions || {};
+  return `拉${dimensions.pull || 0}/承${dimensions.reclaim || 0}/封${dimensions.seal || 0}/量${dimensions.volume || 0}`;
 }
 
 function ageText(ts: number) {

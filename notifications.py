@@ -203,6 +203,22 @@ class NotificationCenter:
             body = f"{code} · {state} · 现价{price} · 分{score}{minute_part} · {reasons} · {item.get('risk_note', '')}".strip()
         return self._emit("next-day-buy", code, name, title, body, bypass_cooldown=bool(rank), critical=bool(rank))
 
+    def notify_next_day_cancel_signal(self, item: dict[str, Any], t1_locked: bool = False) -> Notification:
+        if not self._rule_enabled("next_day_buy_enabled"):
+            return self._disabled("next-day-cancel", item, "买点撤退", "次日买点提醒已关闭")
+        code = str(item.get("code", ""))
+        name = str(item.get("name") or code)
+        state = str(item.get("state") or "买点转弱")
+        price = item.get("price", "--")
+        reasons = "；".join(str(reason) for reason in item.get("reasons", [])[:4])
+        if t1_locked:
+            title = f"T+1风险观察 {name}"
+            body = f"{code} · 今日已成交不可卖 · {state} · 现价{price} · 明日按开盘承接处理 · {reasons}".strip()
+            return self._emit("next-day-t1-risk", code, name, title, body, bypass_cooldown=True, critical=True)
+        title = f"取消买点 {name}"
+        body = f"{code} · {state} · 现价{price} · 分时/承接转弱，未成交则放弃 · {reasons}".strip()
+        return self._emit("next-day-cancel", code, name, title, body, bypass_cooldown=True, critical=True)
+
     def latest(self, limit: int = 50) -> list[dict[str, Any]]:
         return [asdict(item) for item in self._recent[:limit]]
 

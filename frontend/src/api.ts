@@ -151,7 +151,7 @@ export async function fetchPositions(): Promise<PositionsPayload> {
   return fetchJson<PositionsPayload>("/api/positions");
 }
 
-export async function upsertPosition(input: { code: string; name?: string; sector?: string; price: number; shares: number; source?: string }): Promise<PositionsPayload> {
+export async function upsertPosition(input: { code: string; name?: string; sector?: string; price: number; shares: number; source?: string; buy_date?: string }): Promise<PositionsPayload> {
   const params = new URLSearchParams({
     code: input.code,
     name: input.name || "",
@@ -159,8 +159,28 @@ export async function upsertPosition(input: { code: string; name?: string; secto
     price: String(input.price),
     shares: String(input.shares),
     source: input.source || "",
+    buy_date: input.buy_date || "",
   });
   return fetchJson<PositionsPayload>(`/api/positions/upsert?${params.toString()}`);
+}
+
+export async function updateLimitUpExecution(input: {
+  date: string;
+  code: string;
+  status: "triggered" | "filled" | "missed" | "abandoned";
+  price?: number;
+  shares?: number;
+  note?: string;
+}): Promise<{ date: string; code: string; status: string; official: unknown; positions: PositionsPayload }> {
+  const params = new URLSearchParams({
+    date: input.date,
+    code: input.code,
+    status: input.status,
+    price: String(input.price || 0),
+    shares: String(input.shares || 0),
+    note: input.note || "",
+  });
+  return fetchJson<{ date: string; code: string; status: string; official: unknown; positions: PositionsPayload }>(`/api/limit-up/execution?${params.toString()}`);
 }
 
 export async function removePosition(code: string): Promise<PositionsPayload> {
