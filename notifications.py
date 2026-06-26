@@ -180,14 +180,15 @@ class NotificationCenter:
         source = _kline_source_label(str(item.get("kline_source") or ""))
         minute = str(item.get("kline_last_time") or "")
         minute_part = f" · 分时{source}{' ' + minute[-5:] if minute else ''}" if source else ""
-        stage = "封板升级" if item.get("sealed_today") or state in {"首封确认", "回封确认"} else "首次买点"
+        sealed_stage = bool(item.get("sealed_today") or state in {"首封确认", "回封确认"})
+        stage = "正式买点" if sealed_stage else "试探买点"
         if tier == "avoid":
             if not self._rule_enabled("next_day_risk_enabled"):
                 return Notification(time.time(), "next-day-risk", code, name, "剔除票异动", "风险观察提醒已关闭", "disabled", False, "风险观察提醒已关闭")
             title = f"剔除票异动 {name}"
             body = f"{code} · {state} · 现价{price} · 分{score} · 风险剔除票，仅观察不追 · {reasons}".strip()
             return self._emit("next-day-risk", code, name, title, body)
-        prefix = f"正式买点#{rank}" if rank else "隔日买点"
+        prefix = f"{stage}#{rank}" if rank else ("封板确认" if sealed_stage else "试探观察")
         if tier == "core":
             title = f"{prefix} 核心 {name}"
         elif tier == "watch":
@@ -198,7 +199,8 @@ class NotificationCenter:
             trigger = str(item.get("official_trigger_time") or item.get("today_first_limit_time") or minute[-5:] or "")
             entry = item.get("official_entry_price") or item.get("price") or "--"
             title = f"{stage}#{rank} {name} {state}"
-            body = f"{code} · {trigger} · 入场{entry} · 现价{price} · 分{score}{minute_part} · {reasons}".strip()
+            discipline = "封板/回封确认，可按纪律执行" if sealed_stage else "早盘试探，不封板或跌破开盘价立刻放弃"
+            body = f"{code} · {trigger} · 入场{entry} · 现价{price} · 分{score}{minute_part} · {reasons} · {discipline}".strip()
         else:
             body = f"{code} · {state} · 现价{price} · 分{score}{minute_part} · {reasons} · {item.get('risk_note', '')}".strip()
         return self._emit("next-day-buy", code, name, title, body, bypass_cooldown=bool(rank), critical=bool(rank))

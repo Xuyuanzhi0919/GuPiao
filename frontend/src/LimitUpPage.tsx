@@ -125,7 +125,7 @@ export function LimitUpPage() {
         next.delete(item.code);
         return next;
       });
-      setStatus(`${item.name} 已标记${nextStatus === "missed" ? "买不到" : "放弃"}，释放正式买点名额`);
+      setStatus(`${item.name} 已标记${nextStatus === "missed" ? "买不到" : "放弃"}，释放打板信号名额`);
       void load(false, true);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "状态更新失败");
@@ -305,7 +305,7 @@ export function LimitUpPage() {
             <LimitMetric icon={<Flame size={16} />} label={`昨日涨停池${monitorPayload?.source_date ? ` ${monitorPayload.source_date}` : ""}`} value={monitorPayload?.summary.watch_count ?? "--"} />
             <LimitMetric icon={<TrendingUp size={16} />} label={`今日涨停池${monitorPayload?.date ? ` ${monitorPayload.date}` : ""}`} value={monitorPayload?.summary.today_limit_count ?? monitorPayload?.today_pool?.length ?? "--"} />
             <LimitMetric icon={<CalendarClock size={16} />} label="当前阶段" value={monitorPayload?.phase?.label ?? "--"} />
-            <LimitMetric icon={<TrendingUp size={16} />} label="正式买点" value={`${monitorPayload?.summary.buy_signal_count ?? "--"}/3`} />
+            <LimitMetric icon={<TrendingUp size={16} />} label="打板信号" value={`${monitorPayload?.summary.buy_signal_count ?? "--"}/3`} />
             <LimitMetric icon={<ShieldAlert size={16} />} label="出手权限" value={permission?.label ?? "--"} />
             <LimitMetric icon={<RefreshCw size={16} />} label="分时就绪" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
             <LimitMetric icon={<Bell size={16} />} label="推送成功率" value={reliability ? `${reliability.success_rate}%` : "--"} />
@@ -332,7 +332,7 @@ export function LimitUpPage() {
       {showBrief ? (
         <section className="limit-brief-board">
           <BriefPanel
-            empty="暂无正式买点"
+            empty="暂无打板信号"
             items={buyBrief}
             meta={`${monitorPayload?.summary.buy_signal_count ?? 0}/3`}
             onOpen={() => {
@@ -340,7 +340,7 @@ export function LimitUpPage() {
               setShowFullList(true);
             }}
             renderItem={(item) => <BuyBriefItem item={item as LimitUpNextDayRow} />}
-            title="正式买点"
+            title="打板信号"
             tone="hot"
           />
           <BriefPanel
@@ -431,7 +431,7 @@ function LeadBuyCard({
   return (
     <div className="limit-lead-card">
       <header>
-        <span>{item ? "当前买点" : "明日主盯"}</span>
+        <span>{item ? buySignalLevel(item) : "明日主盯"}</span>
         <b>{item ? `#${item.official_rank || 1}` : fallback?.focus_score ? `${fallback.focus_score.toFixed(0)}分` : "--"}</b>
       </header>
       {item ? (
@@ -691,7 +691,7 @@ function BuyCard({
   return (
     <article className={`limit-card ${item.action.toLowerCase()}`}>
       <header>
-        <b>{item.official_rank ? `正式#${item.official_rank}` : item.state}</b>
+        <b>{item.official_rank ? `${buySignalLevel(item)}#${item.official_rank}` : item.state}</b>
         <span>{status.badge}</span>
       </header>
       <h2>{item.name} <small>{item.code}</small></h2>
@@ -732,9 +732,17 @@ function buyRecordStatus(item: LimitUpNextDayRow, bought: boolean) {
   if (item.execution_status === "missed") return { badge: "买不到", button: "买不到", disabled: true };
   if (item.execution_status === "abandoned") return { badge: "已放弃", button: "已放弃", disabled: true };
   if (bought) return { badge: "已记录", button: "已记录买入", disabled: true };
-  if (item.official_buy) return { badge: `系统#${item.official_rank || ""}`, button: "确认成交", disabled: false };
+  if (item.official_buy) return { badge: `${buySignalLevel(item)}#${item.official_rank || ""}`, button: isSealSignal(item) ? "确认成交" : "试探成交", disabled: false };
   if (item.buy_unavailable) return { badge: "买不到", button: "人工确认成交", disabled: false };
   return { badge: `${item.score.toFixed(0)}分`, button: "记录买入", disabled: false };
+}
+
+function isSealSignal(item: LimitUpNextDayRow) {
+  return Boolean(item.sealed_today || item.state === "首封确认" || item.state === "回封确认");
+}
+
+function buySignalLevel(item: LimitUpNextDayRow) {
+  return isSealSignal(item) ? "正式买点" : "试探买点";
 }
 
 function sectorTrendLabel(value?: string) {
