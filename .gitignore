@@ -31,6 +31,7 @@ data/limit_up_next_day_review_*.json
 data/limit_up_next_day_review_latest.json
 data/limit_up_buy_signal_state.json
 data/limit_up_position_signal_state.json
+data/limit_up_notification_ledger.json
 data/limit_up_system_review_history.json
 data/limit_up_official_buys_*.json
 data/limit_up_official_buys_latest.json

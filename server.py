@@ -288,6 +288,16 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
             item for item in payload.get("rows", [])
             if item.get("official_buy") and _official_buy_should_cancel(item)
         ]
+        sent_entry_codes = _sent_entry_codes(sent, str(payload.get("date") or ""))
+        for item in payload.get("rows", []):
+            code = str(item.get("code") or "")
+            if (
+                code in sent_entry_codes
+                and not item.get("official_buy")
+                and str(item.get("execution_status") or "") not in {"filled", "missed", "abandoned"}
+                and _released_buy_should_cancel(item)
+            ):
+                cancel_candidates.append(item)
         cancel_pending = []
         for item in cancel_candidates:
             t1_locked = str(item.get("execution_status") or "") == "filled"
@@ -333,6 +343,34 @@ def _official_buy_should_cancel(item: dict[str, Any]) -> bool:
     if _number(item.get("score")) < 34 and not item.get("sealed_today"):
         return True
     return False
+
+
+def _released_buy_should_cancel(item: dict[str, Any]) -> bool:
+    if item.get("sealed_today"):
+        return False
+    state = str(item.get("state") or "")
+    if state in {"观察承接", "放弃", "风险观察", "买不到"}:
+        return True
+    if _number(item.get("close_from_open_pct")) <= -0.8:
+        return True
+    if _number(item.get("score")) < 58:
+        return True
+    if str(item.get("kline_signal") or "") == "weak":
+        return True
+    return False
+
+
+def _sent_entry_codes(state: dict[str, Any], trade_date: str) -> set[str]:
+    codes: set[str] = set()
+    prefix = f"{trade_date}:"
+    for key, record in state.items():
+        if not str(key).startswith(prefix) or not str(key).endswith(":entry"):
+            continue
+        if isinstance(record, dict) and (record.get("sent") or record.get("channel") in {"record", "disabled"}):
+            code = str(record.get("code") or str(key).split(":")[1])
+            if code:
+                codes.add(code)
+    return codes
 
 
 async def _deliver_notifications(

@@ -200,7 +200,7 @@ class LimitUpMonitor:
             reverse=True,
         )
         allow_official_lock = _allow_official_buy_lock(session, current_date)
-        buy_signals = self._lock_official_buy_signals(current_date, opportunity_signals, rows, allow_official_lock)
+        buy_signals = self._lock_official_buy_signals(current_date, opportunity_signals, rows, allow_official_lock, session)
         kline_source_counts: dict[str, int] = {}
         for signal in kline_by_code.values():
             source = str(signal.get("source") or "unknown")
@@ -288,7 +288,14 @@ class LimitUpMonitor:
         (self.data_dir / "limit_up_official_buys_latest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return payload
 
-    def _lock_official_buy_signals(self, trade_date: str, opportunities: list[dict[str, Any]], rows: list[dict[str, Any]], allow_new_locks: bool = True) -> list[dict[str, Any]]:
+    def _lock_official_buy_signals(
+        self,
+        trade_date: str,
+        opportunities: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        allow_new_locks: bool = True,
+        session: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         if trade_date < OFFICIAL_BUY_START_DATE:
             for row in rows:
                 row["official_buy"] = False
@@ -330,7 +337,13 @@ class LimitUpMonitor:
             for item in opportunities:
                 code = str(item.get("code") or "")
                 sector = str(item.get("sector") or "")
-                if code and code not in locked_codes and not item.get("buy_unavailable") and sector_counts.get(sector, 0) < 2:
+                if (
+                    code
+                    and code not in locked_codes
+                    and not item.get("buy_unavailable")
+                    and sector_counts.get(sector, 0) < 2
+                    and _official_candidate_allowed(item, session)
+                ):
                     locked_codes.append(code)
                     sector_counts[sector] = sector_counts.get(sector, 0) + 1
                 if len(locked_codes) >= 3:
@@ -1577,6 +1590,12 @@ def _official_candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, f
     )
 
 
+def _official_candidate_allowed(item: dict[str, Any], session: dict[str, Any] | None = None) -> bool:
+    if item.get("buy_unavailable"):
+        return False
+    return True
+
+
 def _should_release_official_lock(row: dict[str, Any] | None) -> bool:
     if not row:
         return False
@@ -1689,6 +1708,19 @@ def _time_sort(value: Any) -> int:
     try:
         return int(text)
     except ValueError:
+        return 9999
+
+
+def _session_hhmm(session: dict[str, Any] | None) -> int:
+    text = str((session or {}).get("time") or "")
+    if not text:
+        return 9999
+    parts = text.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+        return hour * 100 + minute
+    except (IndexError, ValueError):
         return 9999
 
 
