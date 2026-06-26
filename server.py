@@ -439,7 +439,10 @@ def _notification_due(record: Any) -> bool:
         return True
     if record.get("sent") or record.get("channel") in {"disabled", "record"}:
         return False
-    retry_sec = int(_number(STATE.notifications.status().get("failed_retry_sec")) or 10)
+    notification_status = STATE.notifications.status()
+    retry_sec = int(_number(notification_status.get("failed_retry_sec")) or 10)
+    if record.get("channel") == "cooldown":
+        retry_sec = int(_number(notification_status.get("cooldown_sec")) or retry_sec)
     last_attempt = _number(record.get("last_attempt_ts") or record.get("ts"))
     return time.time() - last_attempt >= retry_sec
 
