@@ -22,6 +22,7 @@ EASTMONEY_ZT_POOL_URL = "https://push2ex.eastmoney.com/getTopicZTPool"
 EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 EASTMONEY_TRENDS_URL = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
 OFFICIAL_BUY_START_DATE = "2026-06-17"
+DAILY_BUY_TARGET_COUNT = max(1, int(os.environ.get("LIMIT_UP_DAILY_BUY_COUNT", "2") or 2))
 
 
 @dataclass
@@ -103,6 +104,7 @@ class LimitUpMonitor:
             "summary": {
                 "zt_count": len(pool),
                 "focus_count": len(focus),
+                "buy_target_count": DAILY_BUY_TARGET_COUNT,
                 "watch_count": len(pool),
                 "strong_sector_count": len([item for item in sectors if item["limit_count"] >= 3]),
                 "height": max([int(item.get("streak") or 1) for item in pool] or [0]),
@@ -114,6 +116,7 @@ class LimitUpMonitor:
             "errors": [error] if error else [],
         }
         payload = _preserve_openclaw_focus_review(payload, existing)
+        payload["summary"]["buy_target_count"] = DAILY_BUY_TARGET_COUNT
         self._write_focus(payload)
         return payload
 
@@ -152,6 +155,7 @@ class LimitUpMonitor:
             "results": result.get("items") or [],
         }
         focus_payload["summary"]["focus_count"] = len(merged_focus)
+        focus_payload["summary"]["buy_target_count"] = DAILY_BUY_TARGET_COUNT
         self._write_focus(focus_payload)
         return focus_payload
 
@@ -236,7 +240,8 @@ class LimitUpMonitor:
                 "today_limit_count": len(today_pool),
                 "active_count": len([item for item in rows if item.get("state") in {"冲板临界", "首封确认", "回封确认", "分时确认", "开盘确认"}]),
                 "buy_signal_count": len(buy_signals),
-                "remaining_buy_slots": None,
+                "remaining_buy_slots": max(0, DAILY_BUY_TARGET_COUNT - len(buy_signals)),
+                "buy_target_count": DAILY_BUY_TARGET_COUNT,
                 "opportunity_count": len(opportunity_signals),
                 "sealed_count": len([item for item in rows if item.get("sealed_today")]),
                 "excluded_count": len(focus_payload.get("watch_pool") or []) - len(watch_pool),
@@ -327,6 +332,8 @@ class LimitUpMonitor:
                 next_locked_codes.append(code)
             locked_codes = next_locked_codes
             locked_items = {code: item for code, item in locked_items.items() if code in locked_codes}
+            locked_codes = locked_codes[:DAILY_BUY_TARGET_COUNT]
+            locked_items = {code: item for code, item in locked_items.items() if code in locked_codes}
         sector_counts: dict[str, int] = {}
         for code in locked_codes:
             item = locked_items.get(code) or {}
@@ -346,6 +353,8 @@ class LimitUpMonitor:
                 ):
                     locked_codes.append(code)
                     sector_counts[sector] = sector_counts.get(sector, 0) + 1
+                if len(locked_codes) >= DAILY_BUY_TARGET_COUNT:
+                    break
         rank_by_code = {code: index + 1 for index, code in enumerate(locked_codes)}
         by_code = {str(item.get("code")): item for item in opportunities}
         official = []
@@ -868,6 +877,8 @@ def _string_list(value: Any) -> list[str]:
 
 def _monitor_phase(session: dict[str, Any], official_count: int = 0) -> dict[str, Any]:
     code = str(session.get("code") or "")
+    if official_count >= DAILY_BUY_TARGET_COUNT:
+        return {"code": "LOCKED", "label": f"今日{DAILY_BUY_TARGET_COUNT}只买点已锁定", "remaining_slots": 0}
     labels = {
         "PRE_MARKET": "等待开盘",
         "CALL_AUCTION": "集合竞价观察",
@@ -879,7 +890,7 @@ def _monitor_phase(session: dict[str, Any], official_count: int = 0) -> dict[str
         "POST_CLOSE": "等待复盘",
         "CLOSED": "等待收盘复盘",
     }
-    return {"code": code or "UNKNOWN", "label": labels.get(code, str(session.get("label") or "盯盘中")), "remaining_slots": None}
+    return {"code": code or "UNKNOWN", "label": labels.get(code, str(session.get("label") or "盯盘中")), "remaining_slots": max(0, DAILY_BUY_TARGET_COUNT - official_count)}
 
 
 def _allow_official_buy_lock(session: dict[str, Any], trade_date: str) -> bool:

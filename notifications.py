@@ -162,7 +162,7 @@ class NotificationCenter:
             f"主线：{top_sector} · "
             f"重点：{top_focus} · "
             f"{view_part}"
-            "明日纪律：只盯昨日涨停池，出现强承接/封板确认再推买点"
+            f"明日纪律：宽池观察，盘中只锁{summary.get('buy_target_count', 2)}只最强买点"
         )
         return self._emit("limit-up-focus", str(payload.get("date") or ""), "明日重点", title, body, bypass_cooldown=True)
 

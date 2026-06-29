@@ -222,6 +222,7 @@ export function LimitUpPage() {
   const leadBuy = monitorPayload?.buy_signals[0];
   const leadFocus = focusPayload?.focus[0];
   const buyBrief = useMemo(() => monitorPayload?.buy_signals || [], [monitorPayload]);
+  const buyTarget = monitorPayload?.summary.buy_target_count || focusPayload?.summary.buy_target_count || 2;
   const coreBrief = useMemo(() => (focusPayload?.focus || []).filter((item) => item.openclaw_tier === "core"), [focusPayload]);
   const activeBrief = useMemo(() => (monitorPayload?.rows || []).filter((item) => item.action === "WATCH"), [monitorPayload]);
   const quality = monitorPayload?.data_quality;
@@ -305,7 +306,7 @@ export function LimitUpPage() {
             <LimitMetric icon={<Flame size={16} />} label={`昨日涨停池${monitorPayload?.source_date ? ` ${monitorPayload.source_date}` : ""}`} value={monitorPayload?.summary.watch_count ?? "--"} />
             <LimitMetric icon={<TrendingUp size={16} />} label={`今日涨停池${monitorPayload?.date ? ` ${monitorPayload.date}` : ""}`} value={monitorPayload?.summary.today_limit_count ?? monitorPayload?.today_pool?.length ?? "--"} />
             <LimitMetric icon={<CalendarClock size={16} />} label="当前阶段" value={monitorPayload?.phase?.label ?? "--"} />
-            <LimitMetric icon={<TrendingUp size={16} />} label="打板信号" value={monitorPayload?.summary.buy_signal_count ?? "--"} />
+            <LimitMetric icon={<TrendingUp size={16} />} label="打板信号" value={monitorPayload ? `${monitorPayload.summary.buy_signal_count}/${buyTarget}` : "--"} />
             <LimitMetric icon={<ShieldAlert size={16} />} label="出手权限" value={permission?.label ?? "--"} />
             <LimitMetric icon={<RefreshCw size={16} />} label="分时就绪" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
             <LimitMetric icon={<Bell size={16} />} label="推送成功率" value={reliability ? `${reliability.success_rate}%` : "--"} />
@@ -324,7 +325,7 @@ export function LimitUpPage() {
       ) : null}
 
       <CollapseHeader
-        count={`正式 ${buyBrief.length} · 机会 ${monitorPayload?.summary.opportunity_count ?? 0} · 异动 ${activeBrief.length}`}
+        count={`正式 ${buyBrief.length}/${buyTarget} · 剩余 ${monitorPayload?.summary.remaining_buy_slots ?? buyTarget} · 机会 ${monitorPayload?.summary.opportunity_count ?? 0} · 异动 ${activeBrief.length}`}
         onToggle={() => setShowBrief((value) => !value)}
         open={showBrief}
         title="盘中盯盘"
@@ -334,7 +335,7 @@ export function LimitUpPage() {
           <BriefPanel
             empty="暂无打板信号"
             items={buyBrief}
-            meta={`${monitorPayload?.summary.buy_signal_count ?? 0}条`}
+            meta={`${monitorPayload?.summary.buy_signal_count ?? 0}/${buyTarget}`}
             onOpen={() => {
               setTab("buy");
               setShowFullList(true);

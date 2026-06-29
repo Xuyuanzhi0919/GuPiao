@@ -159,7 +159,7 @@ def _build_limit_up_focus_prompt(context: dict[str, Any]) -> str:
         "快速模式：禁止工具、联网、读文件，只基于输入JSON。"
         "目标：先扫描输入里的全部limit_up_pool涨停股票，再从全量中选明日盯盘票。"
         "用户无300/301/688/689/920/8/4开头交易权限，这些代码不得进core/watch。"
-        "宁缺毋滥，核心只给1到3只；观察最多2只；风险剔除最多2只。"
+        "宁缺毋滥，核心可给1到5只，观察可给2到8只；最终次日只由系统按盘中强度锁定2只买点；风险剔除最多5只。"
         "输出必须是紧凑JSON：summary,market_view,items。"
         "items每项只含code,name,tier(core/watch/avoid),confidence,action(watch/avoid),next_day_plan,entry,stop,watch,risk_level,summary。"
         "每个文字字段不超过45个汉字；不要输出reasons/risks数组。"

@@ -84,6 +84,7 @@ export function MobileAppPage() {
   }, [backend]);
 
   const official = monitor?.buy_signals || [];
+  const buyTarget = monitor?.summary.buy_target_count || focus?.summary.buy_target_count || 2;
   const opportunities = useMemo(() => (monitor?.opportunity_signals || monitor?.rows || []).filter((item) => item.action !== "PASS").slice(0, 20), [monitor]);
   const todayPool = monitor?.today_pool || [];
   const watchPool = monitor?.watch_pool || [];
@@ -95,7 +96,7 @@ export function MobileAppPage() {
       <header className="app-mobile-top">
         <div>
           <span>{monitor?.date || "--"} · 打板 App</span>
-          <h1>正式买点 {monitor?.summary.buy_signal_count ?? 0}</h1>
+          <h1>正式买点 {monitor?.summary.buy_signal_count ?? 0}/{buyTarget}</h1>
         </div>
         <button onClick={() => load(false)} type="button">
           <RefreshCw size={17} />
@@ -108,7 +109,7 @@ export function MobileAppPage() {
           {stream === "live" ? "实时流" : stream === "connecting" ? "连接中" : "重连中"}
         </b>
         <span>{monitor?.phase?.label || status || "等待数据"}</span>
-        <span>机会 {monitor?.summary.opportunity_count ?? 0}</span>
+        <span>剩余 {monitor?.summary.remaining_buy_slots ?? buyTarget}</span>
       </section>
 
       {tab === "buy" ? (
