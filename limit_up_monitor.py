@@ -888,7 +888,7 @@ def _monitor_phase(session: dict[str, Any], official_count: int = 0) -> dict[str
 
 
 def _allow_official_buy_lock(session: dict[str, Any], trade_date: str) -> bool:
-    live_codes = {"CALL_AUCTION", "PRE_OPEN", "MORNING", "AFTERNOON", "CLOSING_AUCTION"}
+    live_codes = {"MORNING", "AFTERNOON", "CLOSING_AUCTION"}
     return bool(
         trade_date >= OFFICIAL_BUY_START_DATE
         and str(session.get("date") or "") == trade_date
@@ -1485,7 +1485,16 @@ def _build_next_day_rows(
             intraday_status = "downgraded"
             reasons.append("OpenClaw盘中降级")
 
-        buy_unavailable = bool(sealed and _is_buy_unavailable(today_first_time, today_open_count, open_price, low_price, prev_close, _number(today_item.get("seal_amount"))))
+        tradability = _tradability_state(
+            sealed=sealed,
+            first_time=today_first_time,
+            open_board_count=today_open_count,
+            open_price=open_price,
+            low_price=low_price,
+            prev_close=prev_close,
+            seal_amount=_number(today_item.get("seal_amount")),
+        )
+        buy_unavailable = tradability["status"] == "unavailable"
         action = "BUY" if sealed or score >= 58 else "WATCH" if score >= 34 else "PASS"
         if intraday_status == "downgraded" and action == "BUY" and not sealed:
             action = "WATCH"
@@ -1531,6 +1540,9 @@ def _build_next_day_rows(
                 "today_open_board_count": today_open_count,
                 "buy_stage": state,
                 "buy_unavailable": buy_unavailable,
+                "signal_stage": "official" if sealed else "trial" if action == "BUY" else "watch",
+                "tradability": tradability["status"],
+                "trade_hint": tradability["hint"],
                 "openclaw_tier": tier or "rule",
                 "openclaw_score": focus_item.get("openclaw_score"),
                 "openclaw_summary": focus_item.get("openclaw_summary"),
@@ -1566,12 +1578,41 @@ def _sector_trend(theme: dict[str, Any]) -> str:
 
 
 def _is_buy_unavailable(first_time: Any, open_board_count: int, open_price: float = 0, low_price: float = 0, prev_close: float = 0, seal_amount: float = 0) -> bool:
+    return _tradability_state(
+        sealed=True,
+        first_time=first_time,
+        open_board_count=open_board_count,
+        open_price=open_price,
+        low_price=low_price,
+        prev_close=prev_close,
+        seal_amount=seal_amount,
+    )["status"] == "unavailable"
+
+
+def _tradability_state(
+    *,
+    sealed: bool,
+    first_time: Any,
+    open_board_count: int,
+    open_price: float = 0,
+    low_price: float = 0,
+    prev_close: float = 0,
+    seal_amount: float = 0,
+) -> dict[str, str]:
+    if not sealed:
+        return {"status": "tradable", "hint": "未封板试探，跌破开盘价放弃"}
     first_sort = _time_sort(first_time)
     limit_price = prev_close * 1.1 if prev_close else 0
     one_line = bool(limit_price and open_price >= limit_price * 0.995 and low_price >= limit_price * 0.995 and open_board_count <= 0)
     early_sealed = bool(first_sort <= 930 and open_board_count <= 0)
     huge_seal = bool(seal_amount >= 300_000_000 and open_board_count <= 0 and first_sort <= 935)
-    return early_sealed or one_line or huge_seal
+    if one_line or early_sealed or huge_seal:
+        return {"status": "unavailable", "hint": "封死/一字特征，买不到不追"}
+    if first_sort <= 935 and open_board_count <= 0:
+        return {"status": "queue", "hint": "早盘强封，能排则排，买不到放弃"}
+    if open_board_count > 0:
+        return {"status": "tradable", "hint": "回封确认，仍需确认可成交"}
+    return {"status": "queue", "hint": "封板确认，排队优先"}
 
 
 def _official_candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, float, float, float]:

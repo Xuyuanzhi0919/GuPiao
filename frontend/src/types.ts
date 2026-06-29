@@ -549,6 +549,9 @@ export interface LimitUpNextDayRow {
   today_open_board_count?: number;
   buy_stage?: string;
   buy_unavailable?: boolean;
+  signal_stage?: "trial" | "official" | "watch" | string;
+  tradability?: "tradable" | "queue" | "unavailable" | string;
+  trade_hint?: string;
   official_buy?: boolean;
   official_rank?: number;
   official_locked_at?: number;

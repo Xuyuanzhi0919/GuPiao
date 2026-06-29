@@ -268,13 +268,20 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
             legacy = f"{payload.get('date')}:{item.get('code')}:{item.get('state')}"
             return primary, old_primary, legacy
 
+        def seal_key(item: dict[str, Any]) -> str:
+            return f"{payload.get('date')}:{item.get('code')}:seal"
+
         pending_notifications = [
             (notification_keys(item)[0], item)
             for item in payload.get("buy_signals", [])[:10]
             if _notification_due(sent.get(notification_keys(item)[0]))
             and (
                 _next_day_notification_stage(item) != "entry"
-                or (notification_keys(item)[1] not in sent and notification_keys(item)[2] not in sent)
+                or (
+                    seal_key(item) not in sent
+                    and notification_keys(item)[1] not in sent
+                    and notification_keys(item)[2] not in sent
+                )
             )
         ]
         await _deliver_notifications(

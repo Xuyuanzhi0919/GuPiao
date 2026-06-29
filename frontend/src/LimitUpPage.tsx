@@ -685,6 +685,7 @@ function BuyCard({
 }) {
   const klineText = klineSignalLabel(item.kline_signal);
   const sourceText = klineSourceLabel(item.kline_source);
+  const tradability = tradabilityLabel(item.tradability);
   const canBuy = item.action !== "PASS";
   const status = buyRecordStatus(item, bought);
   const showManualActions = item.official_buy && item.execution_status !== "filled" && item.execution_status !== "missed" && item.execution_status !== "abandoned";
@@ -702,6 +703,7 @@ function BuyCard({
         ["昨日首封", item.source_first_limit_time || "--"],
         ["今日首封", item.today_first_limit_time || (item.sealed_today ? "--" : "未封板")],
         ["买点状态", item.state],
+        ["可参与", tradability],
         ["分时", `${klineText}/${sourceText}`],
         ["最新分钟", minuteTime(item.kline_last_time)],
         ["3分钟", formatPct(item.kline_rise_3m_pct || 0)],
@@ -710,7 +712,7 @@ function BuyCard({
       ]} />
       <div className="limit-tags">{item.reasons.map((reason) => <i key={reason}>{reason}</i>)}</div>
       <footer>
-        <span className="limit-risk-text"><ShieldAlert size={14} />{item.risk_note}</span>
+        <span className="limit-risk-text"><ShieldAlert size={14} />{item.trade_hint || item.risk_note}</span>
         {canBuy ? (
           <div className="limit-execution-actions">
             <button className="limit-buy-button" disabled={status.disabled} onClick={() => onBuy(item)} type="button">{status.button}</button>
@@ -732,8 +734,9 @@ function buyRecordStatus(item: LimitUpNextDayRow, bought: boolean) {
   if (item.execution_status === "missed") return { badge: "买不到", button: "买不到", disabled: true };
   if (item.execution_status === "abandoned") return { badge: "已放弃", button: "已放弃", disabled: true };
   if (bought) return { badge: "已记录", button: "已记录买入", disabled: true };
+  if (item.tradability === "unavailable" || item.buy_unavailable) return { badge: "买不到", button: "买不到", disabled: true };
+  if (item.tradability === "queue") return { badge: "排队", button: "排队确认", disabled: false };
   if (item.official_buy) return { badge: `${buySignalLevel(item)}#${item.official_rank || ""}`, button: isSealSignal(item) ? "确认成交" : "试探成交", disabled: false };
-  if (item.buy_unavailable) return { badge: "买不到", button: "人工确认成交", disabled: false };
   return { badge: `${item.score.toFixed(0)}分`, button: "记录买入", disabled: false };
 }
 
@@ -743,6 +746,12 @@ function isSealSignal(item: LimitUpNextDayRow) {
 
 function buySignalLevel(item: LimitUpNextDayRow) {
   return isSealSignal(item) ? "正式买点" : "试探买点";
+}
+
+function tradabilityLabel(value?: string) {
+  if (value === "queue") return "排队";
+  if (value === "unavailable") return "买不到";
+  return "可买";
 }
 
 function sectorTrendLabel(value?: string) {

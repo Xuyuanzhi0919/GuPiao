@@ -194,17 +194,25 @@ function MobilePanel({ empty, items, render }: { empty: string; items: LimitUpNe
 }
 
 function MobileBuyCard({ item, rank }: { item: LimitUpNextDayRow; rank?: number }) {
+  const tradability = tradabilityLabel(item.tradability);
   return (
     <article className={`app-buy-card ${item.official_buy ? "official" : ""}`}>
       <header>
         <b>{rank ? `正式#${rank}` : item.state}</b>
-        <span>{item.score?.toFixed(0) || "--"}分</span>
+        <span>{tradability} · {item.score?.toFixed(0) || "--"}分</span>
       </header>
       <h2>{item.name}<small>{item.code}</small></h2>
       <p>{item.sector} · {item.state} · 涨幅{formatPct(item.change_pct)} · 成交{formatMoney(item.amount)}</p>
+      <p>{item.trade_hint || item.risk_note}</p>
       <div>{item.reasons.slice(0, 5).map((reason) => <i key={reason}>{reason}</i>)}</div>
     </article>
   );
+}
+
+function tradabilityLabel(value?: string) {
+  if (value === "queue") return "排队";
+  if (value === "unavailable") return "买不到";
+  return "可买";
 }
 
 function MobilePositionCard({ item, quote }: { item: Position; quote?: { price?: number; change_pct?: number; open?: number; high?: number; low?: number } }) {

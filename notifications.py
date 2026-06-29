@@ -177,6 +177,8 @@ class NotificationCenter:
         price = item.get("price", "--")
         score = item.get("score", "--")
         reasons = "；".join(str(reason) for reason in item.get("reasons", [])[:4])
+        trade_hint = str(item.get("trade_hint") or "")
+        tradability = _tradability_label(str(item.get("tradability") or ""))
         source = _kline_source_label(str(item.get("kline_source") or ""))
         minute = str(item.get("kline_last_time") or "")
         minute_part = f" · 分时{source}{' ' + minute[-5:] if minute else ''}" if source else ""
@@ -200,9 +202,9 @@ class NotificationCenter:
             entry = item.get("official_entry_price") or item.get("price") or "--"
             title = f"{stage}#{rank} {name} {state}"
             discipline = "封板/回封确认，可按纪律执行" if sealed_stage else "早盘试探，不封板或跌破开盘价立刻放弃"
-            body = f"{code} · {trigger} · 入场{entry} · 现价{price} · 分{score}{minute_part} · {reasons} · {discipline}".strip()
+            body = f"{code} · {trigger} · 入场{entry} · 现价{price} · {tradability} · 分{score}{minute_part} · {reasons} · {trade_hint or discipline}".strip()
         else:
-            body = f"{code} · {state} · 现价{price} · 分{score}{minute_part} · {reasons} · {item.get('risk_note', '')}".strip()
+            body = f"{code} · {state} · 现价{price} · {tradability} · 分{score}{minute_part} · {reasons} · {trade_hint or item.get('risk_note', '')}".strip()
         return self._emit("next-day-buy", code, name, title, body, bypass_cooldown=bool(rank), critical=bool(rank))
 
     def notify_next_day_cancel_signal(self, item: dict[str, Any], t1_locked: bool = False) -> Notification:
@@ -566,6 +568,14 @@ def _kline_source_label(value: str) -> str:
         "eastmoney-kline": "东财K",
         "tdx": "TDX",
     }.get(value, "")
+
+
+def _tradability_label(value: str) -> str:
+    return {
+        "tradable": "可买",
+        "queue": "排队",
+        "unavailable": "买不到",
+    }.get(value, "可买")
 
 
 def mask_url(value: str) -> str:
