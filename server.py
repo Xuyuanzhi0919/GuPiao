@@ -50,7 +50,6 @@ LIMIT_UP_POSITION_SIGNAL_STATE = DATA / "limit_up_position_signal_state.json"
 LIMIT_UP_NOTIFICATION_LEDGER = DATA / "limit_up_notification_ledger.json"
 LIMIT_UP_SYSTEM_REVIEW_HISTORY = DATA / "limit_up_system_review_history.json"
 LIMIT_UP_SYSTEM_CAPITAL = 100000
-LIMIT_UP_SYSTEM_MAX_POSITIONS = 3
 LIMIT_UP_SYSTEM_FEE_RATE = 0.00025
 LIMIT_UP_SYSTEM_SLIPPAGE_RATE = 0.001
 LIMIT_UP_MONITOR_INTERVAL_SEC = float(os.environ.get("LIMIT_UP_MONITOR_INTERVAL_SEC", "5"))
@@ -681,7 +680,7 @@ def limit_up_system_review_payload(date_key: str = "") -> dict[str, Any]:
         payload = {
             "date": date_key,
             "capital": LIMIT_UP_SYSTEM_CAPITAL,
-            "max_positions": LIMIT_UP_SYSTEM_MAX_POSITIONS,
+            "max_positions": None,
             "selected": None,
             "history": [],
             "stats": _system_review_stats([]),
@@ -698,7 +697,7 @@ def limit_up_system_review_payload(date_key: str = "") -> dict[str, Any]:
     payload = {
         "date": selected.get("date"),
         "capital": LIMIT_UP_SYSTEM_CAPITAL,
-        "max_positions": LIMIT_UP_SYSTEM_MAX_POSITIONS,
+        "max_positions": None,
         "selected": selected,
         "history": records,
         "stats": stats,
@@ -749,7 +748,7 @@ def _build_raw_system_day(payload: dict[str, Any]) -> dict[str, Any] | None:
         "ts": payload.get("ts") or time.time(),
         "rows": rows,
         "rows_by_code": rows_by_code,
-        "official_rows": official_rows[:LIMIT_UP_SYSTEM_MAX_POSITIONS],
+        "official_rows": official_rows,
         "summary": payload.get("summary") or {},
     }
 
@@ -762,7 +761,7 @@ def _official_rows_for_date(date_key: str, rows_by_code: dict[str, dict[str, Any
     codes = [str(code) for code in payload.get("codes") or [] if str(code)]
     items = {str(item.get("code") or ""): item for item in payload.get("items") or [] if isinstance(item, dict)}
     official_rows: list[dict[str, Any]] = []
-    for index, code in enumerate(codes[:LIMIT_UP_SYSTEM_MAX_POSITIONS], start=1):
+    for index, code in enumerate(codes, start=1):
         base = dict(rows_by_code.get(code) or {})
         item = items.get(code) or {}
         base.update({key: value for key, value in item.items() if value not in (None, "")})
@@ -799,19 +798,16 @@ def _simulate_limit_up_account(days: list[dict[str, Any]]) -> list[dict[str, Any
                 updated_positions.append(_position_from_review_row(reviewed))
         positions = updated_positions
 
-        buy_capacity = max(0, LIMIT_UP_SYSTEM_MAX_POSITIONS - len(positions))
         buy_rows = []
         held_codes = {str(item.get("code") or "") for item in positions}
         for row in day.get("official_rows") or []:
             code = str(row.get("code") or "")
             if not code or code in held_codes:
                 continue
-            if len(buy_rows) >= buy_capacity:
-                break
             buy_rows.append(row)
 
         for index, row in enumerate(buy_rows):
-            remaining_slots = max(1, buy_capacity - index)
+            remaining_slots = max(1, len(buy_rows) - index)
             allocation = cash / remaining_slots
             bought = _build_system_buy_row(row, allocation, str(day.get("date") or ""))
             review_rows.append(bought)
@@ -1057,7 +1053,7 @@ def _system_review_rules(selected: dict[str, Any] | None, records: list[dict[str
     if not selected:
         return [
             {"title": "账户", "badge": "等待", "level": "warn", "detail": "暂无系统打板账本。"},
-            {"title": "仓位", "badge": "0/3", "level": "warn", "detail": "等待正式买点。"},
+            {"title": "仓位", "badge": "0只", "level": "warn", "detail": "等待正式买点。"},
             {"title": "纪律", "badge": "空仓", "level": "good", "detail": "没有买点时不强行交易。"},
         ]
     loss_streak = _system_review_stats(records).get("loss_streak", 0)
@@ -1070,7 +1066,7 @@ def _system_review_rules(selected: dict[str, Any] | None, records: list[dict[str
         },
         {
             "title": "仓位",
-            "badge": f"{selected.get('position_count', 0)}/{LIMIT_UP_SYSTEM_MAX_POSITIONS}",
+            "badge": f"{selected.get('position_count', 0)}只",
             "level": "good" if int(_number(selected.get("position_count"))) else "warn",
             "detail": f"买入{selected.get('buy_count', 0)}，卖出{selected.get('sell_count', 0)}，现金{round(_number(selected.get('cash')), 2)}。",
         },
@@ -1097,8 +1093,7 @@ def _legacy_system_review_record(payload: dict[str, Any]) -> dict[str, Any] | No
         if isinstance(row, dict) and (row.get("official_buy") or _number(row.get("official_rank")) > 0)
     ]
     official_rows.sort(key=lambda item: _number(item.get("official_rank")) or 99)
-    official_rows = official_rows[:LIMIT_UP_SYSTEM_MAX_POSITIONS]
-    allocation = LIMIT_UP_SYSTEM_CAPITAL / LIMIT_UP_SYSTEM_MAX_POSITIONS if official_rows else 0
+    allocation = LIMIT_UP_SYSTEM_CAPITAL / len(official_rows) if official_rows else 0
     review_rows = [_build_system_review_row(row, allocation) for row in official_rows]
     pnl_amount = sum(_number(row.get("pnl_amount")) for row in review_rows)
     invested_amount = sum(_number(row.get("invested_amount")) for row in review_rows)
@@ -1239,16 +1234,15 @@ def _limit_up_trade_permission(payload: dict[str, Any]) -> dict[str, Any]:
     loss_streak = int(_number(stats.get("loss_streak")))
     drawdown = _number(stats.get("max_drawdown_pct"))
     failed_today = len([row for row in payload.get("rows") or [] if row.get("official_buy") and _official_buy_should_cancel(row)])
-    remaining = int(_number((payload.get("summary") or {}).get("remaining_buy_slots")) or 0)
     if loss_streak >= 2 or drawdown <= -5 or failed_today >= 2:
         status, label, level = "blocked", "今日停手", "danger"
         reason = "连续亏损/回撤/盘中失败触发总闸门，只观察不新增打板。"
-    elif loss_streak == 1 or failed_today == 1 or remaining <= 1:
+    elif loss_streak == 1 or failed_today == 1:
         status, label, level = "reduced", "收缩出手", "warn"
         reason = "只做核心票封板确认，非核心分时买点不再追。"
     else:
         status, label, level = "normal", "正常出手", "good"
-        reason = "按系统纪律执行：最多3只，只做强承接/封板确认。"
+        reason = "按系统纪律执行：不限固定只数，只做强承接/封板确认。"
     return {
         "status": status,
         "label": label,
@@ -1257,7 +1251,7 @@ def _limit_up_trade_permission(payload: dict[str, Any]) -> dict[str, Any]:
         "loss_streak": loss_streak,
         "max_drawdown_pct": drawdown,
         "failed_today": failed_today,
-        "remaining_slots": remaining,
+        "remaining_slots": None,
         "equity": selected.get("equity") or stats.get("equity") or LIMIT_UP_SYSTEM_CAPITAL,
     }
 

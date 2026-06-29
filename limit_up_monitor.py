@@ -236,7 +236,7 @@ class LimitUpMonitor:
                 "today_limit_count": len(today_pool),
                 "active_count": len([item for item in rows if item.get("state") in {"冲板临界", "首封确认", "回封确认", "分时确认", "开盘确认"}]),
                 "buy_signal_count": len(buy_signals),
-                "remaining_buy_slots": max(0, 3 - len(buy_signals)),
+                "remaining_buy_slots": None,
                 "opportunity_count": len(opportunity_signals),
                 "sealed_count": len([item for item in rows if item.get("sealed_today")]),
                 "excluded_count": len(focus_payload.get("watch_pool") or []) - len(watch_pool),
@@ -346,9 +346,6 @@ class LimitUpMonitor:
                 ):
                     locked_codes.append(code)
                     sector_counts[sector] = sector_counts.get(sector, 0) + 1
-                if len(locked_codes) >= 3:
-                    break
-        locked_codes = locked_codes[:3]
         rank_by_code = {code: index + 1 for index, code in enumerate(locked_codes)}
         by_code = {str(item.get("code")): item for item in opportunities}
         official = []
@@ -871,8 +868,6 @@ def _string_list(value: Any) -> list[str]:
 
 def _monitor_phase(session: dict[str, Any], official_count: int = 0) -> dict[str, Any]:
     code = str(session.get("code") or "")
-    if official_count >= 3:
-        return {"code": "LOCKED", "label": "正式买点已锁满", "remaining_slots": 0}
     labels = {
         "PRE_MARKET": "等待开盘",
         "CALL_AUCTION": "集合竞价观察",
@@ -884,7 +879,7 @@ def _monitor_phase(session: dict[str, Any], official_count: int = 0) -> dict[str
         "POST_CLOSE": "等待复盘",
         "CLOSED": "等待收盘复盘",
     }
-    return {"code": code or "UNKNOWN", "label": labels.get(code, str(session.get("label") or "盯盘中")), "remaining_slots": max(0, 3 - official_count)}
+    return {"code": code or "UNKNOWN", "label": labels.get(code, str(session.get("label") or "盯盘中")), "remaining_slots": None}
 
 
 def _allow_official_buy_lock(session: dict[str, Any], trade_date: str) -> bool:

@@ -591,7 +591,7 @@ export interface LimitUpNextDayPayload {
   phase?: {
     code?: string;
     label?: string;
-    remaining_slots?: number;
+    remaining_slots?: number | null;
   };
   focus: LimitUpStock[];
   watch_pool: LimitUpStock[];
@@ -646,7 +646,7 @@ export interface LimitUpNextDayPayload {
     loss_streak: number;
     max_drawdown_pct: number;
     failed_today: number;
-    remaining_slots: number;
+    remaining_slots: number | null;
     equity: number;
   };
   summary: {
@@ -654,7 +654,7 @@ export interface LimitUpNextDayPayload {
     today_limit_count?: number;
     active_count: number;
     buy_signal_count: number;
-    remaining_buy_slots?: number;
+    remaining_buy_slots?: number | null;
     opportunity_count?: number;
     sealed_count: number;
   };
@@ -744,7 +744,7 @@ export interface LimitUpSystemTrade {
 export interface LimitUpSystemReviewPayload {
   date?: string;
   capital: number;
-  max_positions: number;
+  max_positions?: number | null;
   selected?: LimitUpSystemReviewRecord | null;
   history: LimitUpSystemReviewRecord[];
   positions?: LimitUpSystemReviewRow[];

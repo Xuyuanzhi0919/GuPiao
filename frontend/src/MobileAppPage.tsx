@@ -95,7 +95,7 @@ export function MobileAppPage() {
       <header className="app-mobile-top">
         <div>
           <span>{monitor?.date || "--"} · 打板 App</span>
-          <h1>正式买点 {monitor?.summary.buy_signal_count ?? 0}/3</h1>
+          <h1>正式买点 {monitor?.summary.buy_signal_count ?? 0}</h1>
         </div>
         <button onClick={() => load(false)} type="button">
           <RefreshCw size={17} />
@@ -108,7 +108,7 @@ export function MobileAppPage() {
           {stream === "live" ? "实时流" : stream === "connecting" ? "连接中" : "重连中"}
         </b>
         <span>{monitor?.phase?.label || status || "等待数据"}</span>
-        <span>剩余 {monitor?.summary.remaining_buy_slots ?? 3}</span>
+        <span>机会 {monitor?.summary.opportunity_count ?? 0}</span>
       </section>
 
       {tab === "buy" ? (
