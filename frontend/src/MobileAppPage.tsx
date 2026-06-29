@@ -197,7 +197,7 @@ function MobilePanel({ empty, items, render }: { empty: string; items: LimitUpNe
 function MobileBuyCard({ item, rank }: { item: LimitUpNextDayRow; rank?: number }) {
   const tradability = tradabilityLabel(item.tradability);
   return (
-    <article className={`app-buy-card ${item.official_buy ? "official" : ""}`}>
+    <article className={`app-buy-card ${(item.alert_signal ?? item.official_buy) ? "official" : ""}`}>
       <header>
         <b>{rank ? `提醒#${rank}` : item.state}</b>
         <span>{tradability} · {item.score?.toFixed(0) || "--"}分</span>

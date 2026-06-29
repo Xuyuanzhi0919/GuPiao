@@ -359,6 +359,8 @@ class LimitUpMonitor:
             rank = rank_by_code.get(code)
             row["official_buy"] = bool(rank)
             row["official_rank"] = rank or 0
+            row["alert_signal"] = bool(rank)
+            row["alert_rank"] = rank or 0
             if rank:
                 old = locked_items.get(code) or {}
                 row["official_locked_at"] = old.get("locked_at") or locked_at
@@ -382,6 +384,7 @@ class LimitUpMonitor:
                     "name": item.get("name"),
                     "sector": item.get("sector"),
                     "official_rank": item.get("official_rank"),
+                    "alert_rank": item.get("alert_rank"),
                     "locked_at": item.get("official_locked_at"),
                     "trigger_time": item.get("official_trigger_time"),
                     "trigger_price": item.get("official_trigger_price"),

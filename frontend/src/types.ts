@@ -553,6 +553,8 @@ export interface LimitUpNextDayRow {
   signal_stage?: "trial" | "official" | "watch" | string;
   tradability?: "tradable" | "queue" | "unavailable" | string;
   trade_hint?: string;
+  alert_signal?: boolean;
+  alert_rank?: number;
   official_buy?: boolean;
   official_rank?: number;
   official_locked_at?: number;

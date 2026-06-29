@@ -205,7 +205,8 @@ class NotificationCenter:
             body = f"{code} · {trigger} · 入场{entry} · 现价{price} · {tradability} · 分{score}{minute_part} · {reasons} · {trade_hint or discipline}".strip()
         else:
             body = f"{code} · {state} · 现价{price} · {tradability} · 分{score}{minute_part} · {reasons} · {trade_hint or item.get('risk_note', '')}".strip()
-        return self._emit("next-day-buy", code, name, title, body, bypass_cooldown=bool(rank), critical=bool(rank))
+        critical = _next_day_buy_critical(item, rank)
+        return self._emit("next-day-buy", code, name, title, body, bypass_cooldown=bool(rank), critical=critical)
 
     def notify_next_day_cancel_signal(self, item: dict[str, Any], t1_locked: bool = False) -> Notification:
         if not self._rule_enabled("next_day_buy_enabled"):
@@ -576,6 +577,20 @@ def _tradability_label(value: str) -> str:
         "queue": "排队",
         "unavailable": "买不到",
     }.get(value, "可买")
+
+
+def _next_day_buy_critical(item: dict[str, Any], rank: int) -> bool:
+    if rank <= 0 or rank > 5:
+        return False
+    if str(item.get("tradability") or "") in {"queue", "unavailable"} or item.get("buy_unavailable"):
+        return False
+    if str(item.get("openclaw_tier") or "") == "avoid":
+        return False
+    try:
+        score = float(item.get("score") or 0)
+    except (TypeError, ValueError):
+        score = 0
+    return score >= 58
 
 
 def mask_url(value: str) -> str:

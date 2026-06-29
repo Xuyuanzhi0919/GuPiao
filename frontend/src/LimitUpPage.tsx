@@ -433,7 +433,7 @@ function LeadBuyCard({
     <div className="limit-lead-card">
       <header>
         <span>{item ? buySignalLabel(item) : "明日主盯"}</span>
-        <b>{item ? `#${item.official_rank || 1}` : fallback?.focus_score ? `${fallback.focus_score.toFixed(0)}分` : "--"}</b>
+        <b>{item ? `#${alertRank(item) || 1}` : fallback?.focus_score ? `${fallback.focus_score.toFixed(0)}分` : "--"}</b>
       </header>
       {item ? (
         <>
@@ -447,7 +447,7 @@ function LeadBuyCard({
           <div className="limit-tags compact">{item.reasons.slice(0, 3).map((reason) => <i key={reason}>{reason}</i>)}</div>
           <div className="limit-execution-actions">
             <button className="limit-buy-button" disabled={buyStatus?.disabled} onClick={() => onBuy(item)} type="button">{buyStatus?.button || "确认成交"}</button>
-            {item.official_buy && item.execution_status !== "filled" ? (
+            {isAlertSignal(item) && item.execution_status !== "filled" ? (
               <>
                 <button onClick={() => onExecution(item, "missed")} type="button">买不到</button>
                 <button onClick={() => onExecution(item, "abandoned")} type="button">放弃</button>
@@ -555,7 +555,7 @@ function BuyBriefItem({ item }: { item: LimitUpNextDayRow }) {
   return (
     <>
       <b>{item.name}<small>{item.code}</small></b>
-      <span>{item.official_rank ? `#${item.official_rank} · ` : ""}{item.state} · {item.sector}</span>
+      <span>{alertRank(item) ? `#${alertRank(item)} · ` : ""}{item.state} · {item.sector}</span>
       <em>{formatPct(item.change_pct)} / {item.score.toFixed(0)}分</em>
     </>
   );
@@ -622,7 +622,7 @@ function compareLimitRows(tab: Tab, left: LimitRow, right: LimitRow, sortKey: So
     if (sortKey === "change") return desc(a.change_pct, b.change_pct);
     if (sortKey === "open") return desc(a.open_pct, b.open_pct);
     if (sortKey === "amount") return desc(a.amount, b.amount);
-    return desc(officialWeight(a), officialWeight(b)) || desc(actionWeight(a.action), actionWeight(b.action)) || desc(a.score, b.score) || desc(a.amount, b.amount);
+    return desc(alertWeight(a), alertWeight(b)) || desc(actionWeight(a.action), actionWeight(b.action)) || desc(a.score, b.score) || desc(a.amount, b.amount);
   }
   if (tab === "sectors") {
     const a = left as LimitUpSector;
@@ -661,8 +661,10 @@ function actionWeight(action?: string) {
   return 1;
 }
 
-function officialWeight(item: LimitUpNextDayRow) {
-  return item.official_buy ? 10 - (item.official_rank || 0) : 0;
+function alertWeight(item: LimitUpNextDayRow) {
+  if (!isAlertSignal(item)) return 0;
+  const rank = alertRank(item) || 999;
+  return Math.max(1, 1000 - rank);
 }
 
 function openClawTierWeight(value?: string) {
@@ -697,11 +699,11 @@ function BuyCard({
   const tradability = tradabilityLabel(item.tradability);
   const canBuy = item.action !== "PASS";
   const status = buyRecordStatus(item, bought);
-  const showManualActions = item.official_buy && item.execution_status !== "filled" && item.execution_status !== "missed" && item.execution_status !== "abandoned";
+  const showManualActions = isAlertSignal(item) && item.execution_status !== "filled" && item.execution_status !== "missed" && item.execution_status !== "abandoned";
   return (
     <article className={`limit-card ${item.action.toLowerCase()}`}>
       <header>
-        <b>{item.official_rank ? `${buySignalLabel(item)}#${item.official_rank}` : item.state}</b>
+        <b>{alertRank(item) ? `${buySignalLabel(item)}#${alertRank(item)}` : item.state}</b>
         <span>{status.badge}</span>
       </header>
       <h2>{item.name} <small>{item.code}</small></h2>
@@ -740,8 +742,16 @@ function buyRecordStatus(item: LimitUpNextDayRow, bought: boolean) {
   if (bought) return { badge: "已记录", button: "已记录买入", disabled: true };
   if (item.tradability === "unavailable" || item.buy_unavailable) return { badge: "买不到", button: "买不到", disabled: true };
   if (item.tradability === "queue") return { badge: "排队", button: "排队确认", disabled: false };
-  if (item.official_buy) return { badge: `${buySignalLabel(item)}#${item.official_rank || ""}`, button: isSealSignal(item) ? "排队确认" : "记录成交", disabled: false };
+  if (isAlertSignal(item)) return { badge: `${buySignalLabel(item)}#${alertRank(item) || ""}`, button: isSealSignal(item) ? "排队确认" : "记录成交", disabled: false };
   return { badge: `${item.score.toFixed(0)}分`, button: "记录买入", disabled: false };
+}
+
+function isAlertSignal(item: LimitUpNextDayRow) {
+  return Boolean(item.alert_signal ?? item.official_buy);
+}
+
+function alertRank(item: LimitUpNextDayRow) {
+  return item.alert_rank || item.official_rank || 0;
 }
 
 function isSealSignal(item: LimitUpNextDayRow) {

@@ -270,19 +270,17 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
         def seal_key(item: dict[str, Any]) -> str:
             return f"{payload.get('date')}:{item.get('code')}:seal"
 
-        pending_notifications = [
-            (notification_keys(item)[0], item)
-            for item in payload.get("buy_signals", [])[:10]
-            if _notification_due(sent.get(notification_keys(item)[0]))
-            and (
-                _next_day_notification_stage(item) != "entry"
-                or (
-                    seal_key(item) not in sent
-                    and notification_keys(item)[1] not in sent
-                    and notification_keys(item)[2] not in sent
-                )
-            )
-        ]
+        pending_notifications = []
+        for item in payload.get("buy_signals", []):
+            primary, old_primary, legacy = notification_keys(item)
+            if not _notification_due(sent.get(primary)):
+                continue
+            if (
+                _next_day_notification_stage(item) == "entry"
+                and (seal_key(item) in sent or old_primary in sent or legacy in sent)
+            ):
+                continue
+            pending_notifications.append((primary, item))
         await _deliver_notifications(
             sent,
             "next-day-buy",
@@ -290,15 +288,16 @@ async def maybe_monitor_next_day_buy_signals(tick_driven: bool = False) -> dict[
             lambda item: STATE.notifications.notify_next_day_buy_signal(item),
             lambda item: {"state": item.get("state"), "rank": item.get("official_rank"), "stage": _next_day_notification_stage(item)},
         )
+        trade_date = str(payload.get("date") or "")
+        sent_alert_codes = _sent_alert_codes(sent, trade_date)
         cancel_candidates = [
             item for item in payload.get("rows", [])
-            if item.get("official_buy") and _official_buy_should_cancel(item)
+            if str(item.get("code") or "") in sent_alert_codes and _official_buy_should_cancel(item)
         ]
-        sent_entry_codes = _sent_entry_codes(sent, str(payload.get("date") or ""))
         for item in payload.get("rows", []):
             code = str(item.get("code") or "")
             if (
-                code in sent_entry_codes
+                code in sent_alert_codes
                 and not item.get("official_buy")
                 and str(item.get("execution_status") or "") not in {"filled", "missed", "abandoned"}
                 and _released_buy_should_cancel(item)
@@ -366,14 +365,17 @@ def _released_buy_should_cancel(item: dict[str, Any]) -> bool:
     return False
 
 
-def _sent_entry_codes(state: dict[str, Any], trade_date: str) -> set[str]:
+def _sent_alert_codes(state: dict[str, Any], trade_date: str) -> set[str]:
     codes: set[str] = set()
     prefix = f"{trade_date}:"
     for key, record in state.items():
-        if not str(key).startswith(prefix) or not str(key).endswith(":entry"):
+        key_text = str(key)
+        if not key_text.startswith(prefix):
+            continue
+        if not any(key_text.endswith(f":{stage}") for stage in ("entry", "seal", "risk")):
             continue
         if isinstance(record, dict) and (record.get("sent") or record.get("channel") in {"record", "disabled"}):
-            code = str(record.get("code") or str(key).split(":")[1])
+            code = str(record.get("code") or key_text.split(":")[1])
             if code:
                 codes.add(code)
     return codes
@@ -1375,7 +1377,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             await asyncio.to_thread(STATE.db_store.save_next_day_monitor, payload)
         sent = []
         if notify:
-            for item in payload.get("buy_signals", [])[:10]:
+            for item in payload.get("buy_signals", []):
                 notification = STATE.notifications.notify_next_day_buy_signal(item)
                 sent.append(notification.__dict__)
         payload["notifications"] = sent
