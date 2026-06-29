@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Bell, CircleDot, Flame, Radio, RefreshCw, Settings, ShieldAlert, Target, Wifi, WifiOff } from "lucide-react";
-import { fetchLimitUpNextDayMonitor, fetchLimitUpTomorrowFocus, fetchNotifications, getApiBase, limitUpWebSocketUrl, setApiBase } from "./api";
+import { Bell, CircleDot, Flame, RefreshCw, Settings, ShieldAlert, Target, Wallet, Wifi, WifiOff } from "lucide-react";
+import { fetchLimitUpNextDayMonitor, fetchLimitUpTomorrowFocus, fetchMarketQuotes, fetchNotifications, fetchPositions, getApiBase, limitUpWebSocketUrl, setApiBase } from "./api";
 import { formatMoney, formatPct } from "./format";
-import type { LimitUpNextDayPayload, LimitUpNextDayRow, LimitUpStock, LimitUpTomorrowFocusPayload, NotificationPayload } from "./types";
+import type { LimitUpNextDayPayload, LimitUpNextDayRow, LimitUpStock, LimitUpTomorrowFocusPayload, NotificationPayload, Position } from "./types";
 
-type MobileTab = "buy" | "pool" | "limit" | "focus" | "notice" | "settings";
+type MobileTab = "buy" | "hold" | "pool" | "limit" | "focus" | "notice" | "settings";
 type StreamState = "connecting" | "live" | "stale";
 
 export function MobileAppPage() {
   const [monitor, setMonitor] = useState<LimitUpNextDayPayload | null>(null);
   const [focus, setFocus] = useState<LimitUpTomorrowFocusPayload | null>(null);
   const [notifications, setNotifications] = useState<NotificationPayload | null>(null);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [quotes, setQuotes] = useState<Record<string, { price?: number; change_pct?: number; open?: number; high?: number; low?: number }>>({});
   const [tab, setTab] = useState<MobileTab>("buy");
   const [stream, setStream] = useState<StreamState>("connecting");
   const [status, setStatus] = useState("");
@@ -24,9 +26,14 @@ export function MobileAppPage() {
         fetchLimitUpTomorrowFocus(false),
         fetchNotifications(30),
       ]);
+      const nextPositions = await fetchPositions();
+      const positionRows = nextPositions.positions || [];
+      const quotePayload = positionRows.length ? await fetchMarketQuotes(positionRows.map((item) => item.code)) : { quotes: {} };
       setMonitor(nextMonitor);
       setFocus(nextFocus);
       setNotifications(nextNotifications);
+      setPositions(positionRows);
+      setQuotes(quotePayload.quotes || {});
       if (!silent) setStatus("已同步");
     } catch (error) {
       if (!silent) setStatus(error instanceof Error ? error.message : "同步失败");
@@ -107,6 +114,12 @@ export function MobileAppPage() {
       {tab === "buy" ? (
         <MobilePanel empty="暂无正式买点" items={official} render={(item, index) => <MobileBuyCard item={item} rank={index + 1} />} />
       ) : null}
+      {tab === "hold" ? (
+        <section className="app-mobile-list">
+          <h2>当前持仓 <small>{positions.length}</small></h2>
+          {positions.length ? positions.map((item) => <MobilePositionCard item={item} key={item.code} quote={quotes[item.code]} />) : <p className="empty">暂无持仓</p>}
+        </section>
+      ) : null}
       {tab === "pool" ? (
         <MobilePanel empty="暂无机会池" items={opportunities} render={(item) => <MobileBuyCard item={item} />} />
       ) : null}
@@ -165,6 +178,7 @@ export function MobileAppPage() {
 
       <nav className="app-mobile-tabs">
         <TabButton active={tab === "buy"} icon={<Target size={18} />} label="买点" onClick={() => setTab("buy")} />
+        <TabButton active={tab === "hold"} icon={<Wallet size={18} />} label="持仓" onClick={() => setTab("hold")} />
         <TabButton active={tab === "pool"} icon={<CircleDot size={18} />} label="机会" onClick={() => setTab("pool")} />
         <TabButton active={tab === "limit"} icon={<Flame size={18} />} label="涨停" onClick={() => setTab("limit")} />
         <TabButton active={tab === "focus"} icon={<ShieldAlert size={18} />} label="重点" onClick={() => setTab("focus")} />
@@ -189,6 +203,27 @@ function MobileBuyCard({ item, rank }: { item: LimitUpNextDayRow; rank?: number 
       <h2>{item.name}<small>{item.code}</small></h2>
       <p>{item.sector} · {item.state} · 涨幅{formatPct(item.change_pct)} · 成交{formatMoney(item.amount)}</p>
       <div>{item.reasons.slice(0, 5).map((reason) => <i key={reason}>{reason}</i>)}</div>
+    </article>
+  );
+}
+
+function MobilePositionCard({ item, quote }: { item: Position; quote?: { price?: number; change_pct?: number; open?: number; high?: number; low?: number } }) {
+  const price = Number(quote?.price || item.buy_price || 0);
+  const pnlPct = item.buy_price > 0 ? (price / item.buy_price - 1) * 100 : 0;
+  const pnlAmount = (price - item.buy_price) * item.shares;
+  return (
+    <article className="app-position-card">
+      <header>
+        <b>{item.name}<small>{item.code}</small></b>
+        <em className={pnlPct > 0 ? "up" : pnlPct < 0 ? "down" : "flat"}>{formatPct(pnlPct)}</em>
+      </header>
+      <p>{item.sector} · {item.source === "limit-up" ? "打板持仓" : "手动持仓"} · {item.buy_date || "--"}</p>
+      <div>
+        <span><small>成本</small><strong>{item.buy_price.toFixed(2)}</strong></span>
+        <span><small>现价</small><strong>{price ? price.toFixed(2) : "--"}</strong></span>
+        <span><small>股数</small><strong>{item.shares}</strong></span>
+        <span><small>盈亏</small><strong className={pnlAmount > 0 ? "up" : pnlAmount < 0 ? "down" : "flat"}>{formatMoney(pnlAmount)}</strong></span>
+      </div>
     </article>
   );
 }
