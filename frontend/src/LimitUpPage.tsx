@@ -289,29 +289,29 @@ export function LimitUpPage() {
       {showOverview ? (
         <section className="limit-hero next-day">
           <div className={`limit-command ${command.tone}`}>
-            <span>{monitorPayload?.date || focusPayload?.next_date || "--"} · 隔日监控</span>
-            <strong>{command.title}</strong>
-            <p>{command.detail}</p>
+            <span>{monitorPayload?.date || focusPayload?.next_date || "--"} · {streamState === "live" ? "实时" : "兜底"}</span>
+            <strong>{permission?.label || command.title}</strong>
+            <div className="limit-command-status">
+              <b>买点 {monitorPayload ? `${monitorPayload.summary.buy_signal_count}/${buyTarget}` : "--"}</b>
+              <b>机会 {monitorPayload?.summary.opportunity_count ?? 0}</b>
+              <b>分时 {quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"}</b>
+              <b>延迟 {streamHealth?.publish_age_sec != null ? `${streamHealth.publish_age_sec}s` : "--"}</b>
+            </div>
             <div className="limit-command-rules">
-              {permission ? <b className={`permission-${permission.status}`}>{permission.label}：{permission.reason}</b> : null}
-              {command.rules.map((rule) => <b key={rule}>{rule}</b>)}
+              {permission ? <b className={`permission-${permission.status}`}>{permission.label}</b> : null}
+              {command.rules.slice(0, 2).map((rule) => <b key={rule}>{rule}</b>)}
             </div>
           </div>
 
           <LeadBuyCard boughtCodes={boughtCodes} item={leadBuy} fallback={leadFocus} onBuy={buyLimitUp} onExecution={markExecution} status={status} />
 
           <div className="limit-score-strip">
-            <LimitMetric icon={<Target size={16} />} label={focusDayLabel} value={focusPayload?.summary.focus_count ?? "--"} />
-            <LimitMetric icon={<ShieldAlert size={16} />} label="核心盯盘" value={focusPayload?.openclaw_review?.core_count ?? "--"} />
-            <LimitMetric icon={<Flame size={16} />} label={`昨日涨停池${monitorPayload?.source_date ? ` ${monitorPayload.source_date}` : ""}`} value={monitorPayload?.summary.watch_count ?? "--"} />
-            <LimitMetric icon={<TrendingUp size={16} />} label={`今日涨停池${monitorPayload?.date ? ` ${monitorPayload.date}` : ""}`} value={monitorPayload?.summary.today_limit_count ?? monitorPayload?.today_pool?.length ?? "--"} />
-            <LimitMetric icon={<CalendarClock size={16} />} label="当前阶段" value={monitorPayload?.phase?.label ?? "--"} />
-            <LimitMetric icon={<TrendingUp size={16} />} label="打板信号" value={monitorPayload ? `${monitorPayload.summary.buy_signal_count}/${buyTarget}` : "--"} />
-            <LimitMetric icon={<ShieldAlert size={16} />} label="出手权限" value={permission?.label ?? "--"} />
-            <LimitMetric icon={<RefreshCw size={16} />} label="分时就绪" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
-            <LimitMetric icon={<Bell size={16} />} label="推送成功率" value={reliability ? `${reliability.success_rate}%` : "--"} />
-            <LimitMetric icon={<ActivityIcon />} label="流延迟" value={streamHealth?.publish_age_sec != null ? `${streamHealth.publish_age_sec}s` : "--"} />
-            <LimitMetric icon={<CalendarClock size={16} />} label="数据更新" value={quality?.updated_at ? ageText(quality.updated_at) : "--"} />
+            <LimitMetric icon={<Target size={16} />} label="买点" value={monitorPayload ? `${monitorPayload.summary.buy_signal_count}/${buyTarget}` : "--"} />
+            <LimitMetric icon={<Flame size={16} />} label="昨池" value={monitorPayload?.summary.watch_count ?? "--"} />
+            <LimitMetric icon={<TrendingUp size={16} />} label="今板" value={monitorPayload?.summary.today_limit_count ?? monitorPayload?.today_pool?.length ?? "--"} />
+            <LimitMetric icon={<RefreshCw size={16} />} label="分时" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
+            <LimitMetric icon={<Bell size={16} />} label="推送" value={reliability ? `${reliability.success_rate}%` : "--"} />
+            <LimitMetric icon={<ActivityIcon />} label="阶段" value={monitorPayload?.phase?.label ?? "--"} />
           </div>
           <div className="limit-data-quality">
             <span>{streamState === "live" ? "WebSocket 实时" : "轮询兜底"}</span>
@@ -438,8 +438,13 @@ function LeadBuyCard({
       {item ? (
         <>
           <h2>{item.name} <small>{item.code}</small></h2>
-          <p>{item.state} · {item.sector} · 触发{priceText(item.official_trigger_price || item.price)} · 模拟{priceText(item.official_entry_price || item.price)}</p>
-          <div className="limit-tags">{item.reasons.slice(0, 4).map((reason) => <i key={reason}>{reason}</i>)}</div>
+          <div className="limit-lead-kpis">
+            <span><small>状态</small><b>{item.state}</b></span>
+            <span><small>触发</small><b>{priceText(item.official_trigger_price || item.price)}</b></span>
+            <span><small>成交</small><b>{priceText(item.official_entry_price || item.price)}</b></span>
+            <span><small>涨幅</small><b>{formatPct(item.change_pct)}</b></span>
+          </div>
+          <div className="limit-tags compact">{item.reasons.slice(0, 3).map((reason) => <i key={reason}>{reason}</i>)}</div>
           <div className="limit-execution-actions">
             <button className="limit-buy-button" disabled={buyStatus?.disabled} onClick={() => onBuy(item)} type="button">{buyStatus?.button || "确认成交"}</button>
             {item.official_buy && item.execution_status !== "filled" ? (
@@ -453,8 +458,13 @@ function LeadBuyCard({
       ) : fallback ? (
         <>
           <h2>{fallback.name} <small>{fallback.code}</small></h2>
-          <p>{fallback.next_day_plan || "明日观察"} · {fallback.sector} · {fallback.streak || 1}板 · 首封{fallback.first_limit_time || "--"}</p>
-          <div className="limit-tags">{(fallback.focus_reasons || []).slice(0, 4).map((reason) => <i key={reason}>{reason}</i>)}</div>
+          <div className="limit-lead-kpis">
+            <span><small>计划</small><b>{fallback.next_day_plan || "观察"}</b></span>
+            <span><small>板块</small><b>{fallback.sector || "--"}</b></span>
+            <span><small>连板</small><b>{fallback.streak || 1}</b></span>
+            <span><small>首封</small><b>{fallback.first_limit_time || "--"}</b></span>
+          </div>
+          <div className="limit-tags compact">{(fallback.focus_reasons || []).slice(0, 3).map((reason) => <i key={reason}>{reason}</i>)}</div>
         </>
       ) : (
         <>
@@ -547,7 +557,6 @@ function BuyBriefItem({ item }: { item: LimitUpNextDayRow }) {
       <b>{item.name}<small>{item.code}</small></b>
       <span>{item.official_rank ? `#${item.official_rank} · ` : ""}{item.state} · {item.sector}</span>
       <em>{formatPct(item.change_pct)} / {item.score.toFixed(0)}分</em>
-      <i>{item.reasons[0] || item.risk_note}</i>
     </>
   );
 }
@@ -558,7 +567,6 @@ function FocusBriefItem({ item }: { item: LimitUpStock }) {
       <b>{item.name}<small>{item.code}</small></b>
       <span>{item.sector || "未分组"} · {item.streak || 1}板 · 首封{item.first_limit_time || "--"}</span>
       <em>{item.openclaw_score ? `AI ${item.openclaw_score}` : `${item.focus_score?.toFixed(0) || "--"}分`}</em>
-      <i>{item.openclaw_summary || item.focus_reasons?.[0] || item.next_day_plan || "观察承接"}</i>
     </>
   );
 }
@@ -697,23 +705,18 @@ function BuyCard({
         <span>{status.badge}</span>
       </header>
       <h2>{item.name} <small>{item.code}</small></h2>
-      <p>{item.sector} · 昨日{item.source_streak}板 · 高开{formatPct(item.open_pct)} · 涨幅{formatPct(item.change_pct)} · 成交{formatMoney(item.amount)}</p>
+      <p>{item.sector} · 昨日{item.source_streak}板 · 成交{formatMoney(item.amount)}</p>
       <LimitTimeStrip items={[
         ["触发", item.official_trigger_time || "--"],
-        ["模拟成交", item.official_entry_price ? priceText(item.official_entry_price) : "--"],
-        ["昨日首封", item.source_first_limit_time || "--"],
-        ["今日首封", item.today_first_limit_time || (item.sealed_today ? "--" : "未封板")],
-        ["买点状态", item.state],
+        ["入场", item.official_entry_price ? priceText(item.official_entry_price) : priceText(item.price)],
+        ["涨幅", formatPct(item.change_pct)],
         ["可参与", tradability],
         ["分时", `${klineText}/${sourceText}`],
-        ["最新分钟", minuteTime(item.kline_last_time)],
         ["3分钟", formatPct(item.kline_rise_3m_pct || 0)],
-        ["板块", sectorTrendLabel(item.sector_trend)],
-        ["五维", dimensionSummary(item)],
       ]} />
-      <div className="limit-tags">{item.reasons.map((reason) => <i key={reason}>{reason}</i>)}</div>
+      <div className="limit-tags compact">{item.reasons.slice(0, 3).map((reason) => <i key={reason}>{reason}</i>)}</div>
       <footer>
-        <span className="limit-risk-text"><ShieldAlert size={14} />{item.trade_hint || item.risk_note}</span>
+        <span className="limit-risk-text"><ShieldAlert size={14} />{item.trade_hint || item.state}</span>
         {canBuy ? (
           <div className="limit-execution-actions">
             <button className="limit-buy-button" disabled={status.disabled} onClick={() => onBuy(item)} type="button">{status.button}</button>
@@ -755,18 +758,6 @@ function tradabilityLabel(value?: string) {
   return "可买";
 }
 
-function sectorTrendLabel(value?: string) {
-  if (value === "enhancing") return "增强";
-  if (value === "fading") return "退潮";
-  if (value === "normal") return "正常";
-  return "--";
-}
-
-function dimensionSummary(item: LimitUpNextDayRow) {
-  const dimensions = item.kline_dimensions || {};
-  return `拉${dimensions.pull || 0}/承${dimensions.reclaim || 0}/封${dimensions.seal || 0}/量${dimensions.volume || 0}`;
-}
-
 function ageText(ts: number) {
   const age = Math.max(0, Math.round(Date.now() / 1000 - Number(ts || 0)));
   if (age < 60) return `${age}s前`;
@@ -794,12 +785,6 @@ function klineSourceLabel(value?: string) {
   return "无源";
 }
 
-function minuteTime(value?: string) {
-  if (!value) return "--";
-  const text = String(value);
-  return text.includes(" ") ? text.split(" ").pop() || text : text;
-}
-
 function priceText(value?: number | string) {
   const number = Number(value || 0);
   return number > 0 ? number.toFixed(2) : "--";
@@ -820,8 +805,7 @@ function FocusCard({ item }: { item: LimitUpStock }) {
         ["末封", item.last_limit_time || "--"],
         ["炸板", `${item.open_board_count || 0}次`],
       ]} />
-      {item.openclaw_summary ? <p className="limit-openclaw-summary">{item.openclaw_summary}</p> : null}
-      <div className="limit-tags">{(item.focus_reasons || []).slice(0, 4).map((reason) => <i key={reason}>{reason}</i>)}</div>
+      <div className="limit-tags compact">{(item.focus_reasons || []).slice(0, 2).map((reason) => <i key={reason}>{reason}</i>)}</div>
       {item.openclaw_risks?.length ? <footer><ShieldAlert size={14} />{item.openclaw_risks[0]}</footer> : null}
     </article>
   );
