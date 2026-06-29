@@ -74,7 +74,7 @@ export function ReviewPage() {
         <article className={selected?.decision?.level || "warn"}>
           <small>{selected?.source_date || "--"} 涨停池 → {selected?.date || "--"} 账户复盘</small>
           <strong>{headline}</strong>
-          <span>{selected?.decision?.action || "等待账本"} · {selected?.decision?.reason || "暂无系统正式打板样本"}</span>
+          <span>{selected?.decision?.action || "等待账本"} · {selected?.decision?.reason || "暂无系统打板样本"}</span>
         </article>
         <div>
           {rules.map((rule) => (
@@ -153,7 +153,7 @@ export function ReviewPage() {
       <section className="review-record-panel">
         <header>
           <h2>账户明细</h2>
-          <span>只统计系统正式打板，初始资金 {formatMoney(ledger?.capital ?? SYSTEM_START_CAPITAL, false)}</span>
+          <span>只统计系统打板记录，初始资金 {formatMoney(ledger?.capital ?? SYSTEM_START_CAPITAL, false)}</span>
         </header>
         <div className="review-record-list limit-up-review-table">
           {(selected?.rows || []).map((item, index) => (
@@ -291,7 +291,7 @@ function executionLabel(value?: string) {
 }
 
 function accountSummary(record: LimitUpSystemReviewRecord | null) {
-  if (!record) return "暂无系统正式打板记录。";
+  if (!record) return "暂无系统打板记录。";
   return `期末净值 ${formatMoney(record.equity || SYSTEM_START_CAPITAL, false)}，现金 ${formatMoney(record.cash, false)}，市值 ${formatMoney(record.market_value || 0, false)}，回撤 ${formatPct(record.drawdown_pct || 0)}。`;
 }
 

@@ -84,7 +84,7 @@ export function MobileAppPage() {
   }, [backend]);
 
   const official = monitor?.buy_signals || [];
-  const buyTarget = monitor?.summary.buy_target_count || focus?.summary.buy_target_count || 2;
+  const reviewTarget = monitor?.summary.review_buy_count || focus?.summary.review_buy_count || 2;
   const opportunities = useMemo(() => (monitor?.opportunity_signals || monitor?.rows || []).filter((item) => item.action !== "PASS").slice(0, 20), [monitor]);
   const todayPool = monitor?.today_pool || [];
   const watchPool = monitor?.watch_pool || [];
@@ -96,7 +96,7 @@ export function MobileAppPage() {
       <header className="app-mobile-top">
         <div>
           <span>{monitor?.date || "--"} · 打板 App</span>
-          <h1>正式买点 {monitor?.summary.buy_signal_count ?? 0}/{buyTarget}</h1>
+          <h1>打板提醒 {monitor?.summary.buy_signal_count ?? 0}</h1>
         </div>
         <button onClick={() => load(false)} type="button">
           <RefreshCw size={17} />
@@ -109,11 +109,11 @@ export function MobileAppPage() {
           {stream === "live" ? "实时流" : stream === "connecting" ? "连接中" : "重连中"}
         </b>
         <span>{monitor?.phase?.label || status || "等待数据"}</span>
-        <span>剩余 {monitor?.summary.remaining_buy_slots ?? buyTarget}</span>
+        <span>复盘{reviewTarget}只</span>
       </section>
 
       {tab === "buy" ? (
-        <MobilePanel empty="暂无正式买点" items={official} render={(item, index) => <MobileBuyCard item={item} rank={index + 1} />} />
+        <MobilePanel empty="暂无打板提醒" items={official} render={(item, index) => <MobileBuyCard item={item} rank={index + 1} />} />
       ) : null}
       {tab === "hold" ? (
         <section className="app-mobile-list">
@@ -199,7 +199,7 @@ function MobileBuyCard({ item, rank }: { item: LimitUpNextDayRow; rank?: number 
   return (
     <article className={`app-buy-card ${item.official_buy ? "official" : ""}`}>
       <header>
-        <b>{rank ? `正式#${rank}` : item.state}</b>
+        <b>{rank ? `提醒#${rank}` : item.state}</b>
         <span>{tradability} · {item.score?.toFixed(0) || "--"}分</span>
       </header>
       <h2>{item.name}<small>{item.code}</small></h2>

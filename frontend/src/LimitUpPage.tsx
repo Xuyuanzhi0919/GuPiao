@@ -222,7 +222,7 @@ export function LimitUpPage() {
   const leadBuy = monitorPayload?.buy_signals[0];
   const leadFocus = focusPayload?.focus[0];
   const buyBrief = useMemo(() => monitorPayload?.buy_signals || [], [monitorPayload]);
-  const buyTarget = monitorPayload?.summary.buy_target_count || focusPayload?.summary.buy_target_count || 2;
+  const reviewTarget = monitorPayload?.summary.review_buy_count || focusPayload?.summary.review_buy_count || 2;
   const coreBrief = useMemo(() => (focusPayload?.focus || []).filter((item) => item.openclaw_tier === "core"), [focusPayload]);
   const activeBrief = useMemo(() => (monitorPayload?.rows || []).filter((item) => item.action === "WATCH"), [monitorPayload]);
   const quality = monitorPayload?.data_quality;
@@ -292,10 +292,10 @@ export function LimitUpPage() {
             <span>{monitorPayload?.date || focusPayload?.next_date || "--"} · {streamState === "live" ? "实时" : "兜底"}</span>
             <strong>{permission?.label || command.title}</strong>
             <div className="limit-command-status">
-              <b>买点 {monitorPayload ? `${monitorPayload.summary.buy_signal_count}/${buyTarget}` : "--"}</b>
+              <b>提醒 {monitorPayload?.summary.buy_signal_count ?? "--"}</b>
               <b>机会 {monitorPayload?.summary.opportunity_count ?? 0}</b>
+              <b>复盘 {reviewTarget}只</b>
               <b>分时 {quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"}</b>
-              <b>延迟 {streamHealth?.publish_age_sec != null ? `${streamHealth.publish_age_sec}s` : "--"}</b>
             </div>
             <div className="limit-command-rules">
               {permission ? <b className={`permission-${permission.status}`}>{permission.label}</b> : null}
@@ -306,7 +306,7 @@ export function LimitUpPage() {
           <LeadBuyCard boughtCodes={boughtCodes} item={leadBuy} fallback={leadFocus} onBuy={buyLimitUp} onExecution={markExecution} status={status} />
 
           <div className="limit-score-strip">
-            <LimitMetric icon={<Target size={16} />} label="买点" value={monitorPayload ? `${monitorPayload.summary.buy_signal_count}/${buyTarget}` : "--"} />
+            <LimitMetric icon={<Target size={16} />} label="提醒" value={monitorPayload?.summary.buy_signal_count ?? "--"} />
             <LimitMetric icon={<Flame size={16} />} label="昨池" value={monitorPayload?.summary.watch_count ?? "--"} />
             <LimitMetric icon={<TrendingUp size={16} />} label="今板" value={monitorPayload?.summary.today_limit_count ?? monitorPayload?.today_pool?.length ?? "--"} />
             <LimitMetric icon={<RefreshCw size={16} />} label="分时" value={quality ? `${quality.kline_ready_count}/${quality.kline_requested_count}` : "--"} />
@@ -325,7 +325,7 @@ export function LimitUpPage() {
       ) : null}
 
       <CollapseHeader
-        count={`正式 ${buyBrief.length}/${buyTarget} · 剩余 ${monitorPayload?.summary.remaining_buy_slots ?? buyTarget} · 机会 ${monitorPayload?.summary.opportunity_count ?? 0} · 异动 ${activeBrief.length}`}
+        count={`提醒 ${buyBrief.length} · 复盘${reviewTarget}只 · 机会 ${monitorPayload?.summary.opportunity_count ?? 0} · 异动 ${activeBrief.length}`}
         onToggle={() => setShowBrief((value) => !value)}
         open={showBrief}
         title="盘中盯盘"
@@ -335,7 +335,7 @@ export function LimitUpPage() {
           <BriefPanel
             empty="暂无打板信号"
             items={buyBrief}
-            meta={`${monitorPayload?.summary.buy_signal_count ?? 0}/${buyTarget}`}
+            meta={`${monitorPayload?.summary.buy_signal_count ?? 0}条`}
             onOpen={() => {
               setTab("buy");
               setShowFullList(true);
@@ -432,7 +432,7 @@ function LeadBuyCard({
   return (
     <div className="limit-lead-card">
       <header>
-        <span>{item ? buySignalLevel(item) : "明日主盯"}</span>
+        <span>{item ? buySignalLabel(item) : "明日主盯"}</span>
         <b>{item ? `#${item.official_rank || 1}` : fallback?.focus_score ? `${fallback.focus_score.toFixed(0)}分` : "--"}</b>
       </header>
       {item ? (
@@ -701,7 +701,7 @@ function BuyCard({
   return (
     <article className={`limit-card ${item.action.toLowerCase()}`}>
       <header>
-        <b>{item.official_rank ? `${buySignalLevel(item)}#${item.official_rank}` : item.state}</b>
+        <b>{item.official_rank ? `${buySignalLabel(item)}#${item.official_rank}` : item.state}</b>
         <span>{status.badge}</span>
       </header>
       <h2>{item.name} <small>{item.code}</small></h2>
@@ -740,7 +740,7 @@ function buyRecordStatus(item: LimitUpNextDayRow, bought: boolean) {
   if (bought) return { badge: "已记录", button: "已记录买入", disabled: true };
   if (item.tradability === "unavailable" || item.buy_unavailable) return { badge: "买不到", button: "买不到", disabled: true };
   if (item.tradability === "queue") return { badge: "排队", button: "排队确认", disabled: false };
-  if (item.official_buy) return { badge: `${buySignalLevel(item)}#${item.official_rank || ""}`, button: isSealSignal(item) ? "确认成交" : "试探成交", disabled: false };
+  if (item.official_buy) return { badge: `${buySignalLabel(item)}#${item.official_rank || ""}`, button: isSealSignal(item) ? "排队确认" : "记录成交", disabled: false };
   return { badge: `${item.score.toFixed(0)}分`, button: "记录买入", disabled: false };
 }
 
@@ -748,8 +748,8 @@ function isSealSignal(item: LimitUpNextDayRow) {
   return Boolean(item.sealed_today || item.state === "首封确认" || item.state === "回封确认");
 }
 
-function buySignalLevel(item: LimitUpNextDayRow) {
-  return isSealSignal(item) ? "正式买点" : "试探买点";
+function buySignalLabel(item: LimitUpNextDayRow) {
+  return isSealSignal(item) ? "封板观察" : "打板提醒";
 }
 
 function tradabilityLabel(value?: string) {

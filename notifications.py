@@ -162,7 +162,7 @@ class NotificationCenter:
             f"主线：{top_sector} · "
             f"重点：{top_focus} · "
             f"{view_part}"
-            f"明日纪律：宽池观察，盘中只锁{summary.get('buy_target_count', 2)}只最强买点"
+            f"明日纪律：宽池观察，符合条件都提醒；系统复盘只记录前{summary.get('review_buy_count', 2)}只"
         )
         return self._emit("limit-up-focus", str(payload.get("date") or ""), "明日重点", title, body, bypass_cooldown=True)
 
@@ -183,14 +183,14 @@ class NotificationCenter:
         minute = str(item.get("kline_last_time") or "")
         minute_part = f" · 分时{source}{' ' + minute[-5:] if minute else ''}" if source else ""
         sealed_stage = bool(item.get("sealed_today") or state in {"首封确认", "回封确认"})
-        stage = "正式买点" if sealed_stage else "试探买点"
+        stage = "封板观察" if sealed_stage else "打板提醒"
         if tier == "avoid":
             if not self._rule_enabled("next_day_risk_enabled"):
                 return Notification(time.time(), "next-day-risk", code, name, "剔除票异动", "风险观察提醒已关闭", "disabled", False, "风险观察提醒已关闭")
             title = f"剔除票异动 {name}"
             body = f"{code} · {state} · 现价{price} · 分{score} · 风险剔除票，仅观察不追 · {reasons}".strip()
             return self._emit("next-day-risk", code, name, title, body)
-        prefix = f"{stage}#{rank}" if rank else ("封板确认" if sealed_stage else "试探观察")
+        prefix = f"{stage}#{rank}" if rank else ("封板观察" if sealed_stage else "打板提醒")
         if tier == "core":
             title = f"{prefix} 核心 {name}"
         elif tier == "watch":
@@ -201,7 +201,7 @@ class NotificationCenter:
             trigger = str(item.get("official_trigger_time") or item.get("today_first_limit_time") or minute[-5:] or "")
             entry = item.get("official_entry_price") or item.get("price") or "--"
             title = f"{stage}#{rank} {name} {state}"
-            discipline = "封板/回封确认，可按纪律执行" if sealed_stage else "早盘试探，不封板或跌破开盘价立刻放弃"
+            discipline = "封板后先看可参与状态，排队/买不到不追" if sealed_stage else "早盘强承接提醒，跌破开盘价放弃"
             body = f"{code} · {trigger} · 入场{entry} · 现价{price} · {tradability} · 分{score}{minute_part} · {reasons} · {trade_hint or discipline}".strip()
         else:
             body = f"{code} · {state} · 现价{price} · {tradability} · 分{score}{minute_part} · {reasons} · {trade_hint or item.get('risk_note', '')}".strip()

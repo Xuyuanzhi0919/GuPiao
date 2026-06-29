@@ -481,7 +481,7 @@ export interface LimitUpTomorrowFocusPayload {
   summary: {
     zt_count: number;
     focus_count: number;
-    buy_target_count?: number;
+    review_buy_count?: number;
     watch_count: number;
     strong_sector_count: number;
     height: number;
@@ -655,7 +655,7 @@ export interface LimitUpNextDayPayload {
     today_limit_count?: number;
     active_count: number;
     buy_signal_count: number;
-    buy_target_count?: number;
+    review_buy_count?: number;
     remaining_buy_slots?: number | null;
     opportunity_count?: number;
     sealed_count: number;
